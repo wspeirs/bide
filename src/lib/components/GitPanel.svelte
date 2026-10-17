@@ -201,7 +201,7 @@
           <div class="text-[11px] text-[#6f737a] italic px-1">No staged changes</div>
         {:else}
           {#each gitStatus.staged as f (f.path)}
-            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors">
+            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[13px]">
               <div class="flex items-center gap-1.5 truncate flex-1 mr-2" title={f.orig_path ? `${f.orig_path} -> ${f.path}` : f.path}>
                 <span class="w-3 text-center font-bold {f.status === 'D' ? 'text-[#e55765]' : f.status === 'A' ? 'text-[#59a869]' : 'text-[#3574f0]'}">
                   {f.status}
@@ -240,7 +240,7 @@
           <div class="text-[11px] text-[#6f737a] italic px-1">No unstaged changes</div>
         {:else}
           {#each gitStatus.unstaged as f (f.path)}
-            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors">
+            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[13px]">
               <div class="flex items-center gap-1.5 truncate flex-1 mr-2" title={f.path}>
                 <span class="w-3 text-center font-bold {f.status === 'D' ? 'text-[#e55765]' : 'text-[#e2a53b]'}">
                   {f.status}
@@ -269,7 +269,7 @@
           <div class="text-[11px] text-[#6f737a] italic px-1">No untracked files</div>
         {:else}
           {#each gitStatus.untracked as p (p)}
-            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors">
+            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[13px]">
               <div class="flex items-center gap-1.5 truncate flex-1 mr-2" title={p}>
                 <span class="w-3 text-center font-bold text-[#6f737a]">?</span>
                 <span class="truncate text-[#dfe1e5]">{p}</span>

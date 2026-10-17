@@ -64,11 +64,11 @@
   <div
     bind:this={containerRef}
     onscroll={onScroll}
-    class="flex-1 p-3 font-mono text-sm overflow-y-auto leading-relaxed space-y-3"
+    class="flex-1 p-3 font-mono text-[13px] overflow-y-auto leading-relaxed space-y-3"
   >
     <!-- Thinking section if present -->
     {#if project.thinking}
-      <div class="bg-[#252629]/50 border border-[#2b2d30] rounded p-2 text-neutral-400 italic font-mono text-xs whitespace-pre-wrap leading-relaxed">
+      <div class="bg-[#252629]/50 border border-[#2b2d30] rounded p-2 text-neutral-400 italic font-mono text-[13px] whitespace-pre-wrap leading-relaxed">
         <div class="text-[10px] uppercase font-sans tracking-wider text-[#6f737a] not-italic mb-1 font-semibold flex items-center gap-1.5">
           <span class="w-1.5 h-1.5 rounded-full bg-[#3574f0]/60"></span>
           Thinking
@@ -80,12 +80,12 @@
     <!-- Activity Log items -->
     {#each project.activityLog as item (item.id)}
       {#if item.type === 'text'}
-        <div class="font-mono text-sm text-[#dfe1e5] leading-relaxed whitespace-pre-wrap break-words">
+        <div class="font-mono text-[13px] text-[#dfe1e5] leading-relaxed whitespace-pre-wrap break-words">
           {item.text}
         </div>
       {:else if item.type === 'tool_call'}
         {@const isExpanded = !!expandedTools[item.id]}
-        <div class="border border-[#2b2d30] bg-[#252629] rounded text-xs overflow-hidden">
+        <div class="border border-[#2b2d30] bg-[#252629] rounded text-[13px] overflow-hidden">
           <button
             type="button"
             onclick={() => toggleTool(item.id)}

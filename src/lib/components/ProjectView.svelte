@@ -1,5 +1,6 @@
 <script lang="ts">
   import { PaneGroup, Pane, PaneResizer } from 'paneforge';
+  import ErrorBanner from './ErrorBanner.svelte';
   import CwdBar from './CwdBar.svelte';
   import LastPrompt from './LastPrompt.svelte';
   import ActivityPane from './ActivityPane.svelte';
@@ -37,6 +38,9 @@
 <div class="flex flex-col h-full w-full bg-[#1e1f22] overflow-hidden select-none">
   <!-- Top CwdBar -->
   <CwdBar {project} />
+  <!-- Error Banner (process exit / error status with last stderr + restart) -->
+  <ErrorBanner {project} />
+
 
   <!-- Main Horizontal Split: Left Column (Chat/Prompt) vs Right Column (Git) -->
   <div class="flex-1 w-full overflow-hidden">

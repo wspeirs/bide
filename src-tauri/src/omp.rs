@@ -306,6 +306,7 @@ impl OmpSession {
         let ready_tx_clone = Arc::clone(&ready_tx_cell);
         let settled_clone = Arc::clone(&is_settled);
         let streaming_clone = Arc::clone(&is_streaming);
+        let stderr_buf_for_exit = Arc::clone(&stderr_buf);
 
         let stdout_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
@@ -334,6 +335,24 @@ impl OmpSession {
             for (_, tx) in pending.drain() {
                 let _ = tx.send(Err("Session closed".to_string()));
             }
+
+            // Send process_exited frame to UI
+            let recent_stderr: Vec<String> = stderr_buf_for_exit
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect();
+            let mut exit_frame = serde_json::Map::new();
+            exit_frame.insert("type".to_string(), Value::String("process_exited".to_string()));
+            exit_frame.insert(
+                "stderr".to_string(),
+                Value::Array(recent_stderr.into_iter().map(Value::String).collect()),
+            );
+            let exit_val = Value::Object(exit_frame);
+            let _ = broadcast_clone.send(exit_val.clone());
+            let mut chs = tauri_clone.lock().unwrap();
+            chs.retain(|ch| ch.send(exit_val.clone()).is_ok());
         });
 
         let session = Arc::new(Self {

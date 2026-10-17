@@ -202,6 +202,33 @@ class ProjectsStore {
       }
     }
   }
+  async closeActiveProject(): Promise<void> {
+    if (this.activeProjectId) {
+      await this.closeProject(this.activeProjectId);
+    }
+  }
+
+  async restartProject(id: string): Promise<void> {
+    const project = this.projects.find((p) => p.id === id);
+    if (!project) return;
+
+    project.status = 'starting';
+    project.isStreaming = false;
+    project.errorStderr = null;
+
+    try {
+      await invoke<ProjectInfo>('project_restart', { id });
+      project.status = 'ready';
+      this.refreshState(id);
+      this.refreshGitStatus(id);
+    } catch (err) {
+      project.status = 'error';
+      const msg = typeof err === 'string' ? err : (err as Error)?.message || String(err);
+      project.errorStderr = `Restart failed: ${msg}`;
+      throw err;
+    }
+  }
+
 
   private setupSubscription(id: string) {
     if (this.subscribedChannels.has(id)) return;
@@ -349,6 +376,15 @@ class ProjectsStore {
         project.isStreaming = false;
         this.refreshGitStatus(id);
         break;
+
+      case 'process_exited': {
+        project.status = 'error';
+        project.isStreaming = false;
+        const lines = Array.isArray(frame.stderr) ? (frame.stderr as string[]) : [];
+        const stderrText = lines.join('\n').trim();
+        project.errorStderr = stderrText || 'omp process exited unexpectedly';
+        break;
+      }
 
       case 'model_changed':
       case 'thinking_level_changed':

@@ -22,6 +22,14 @@ pub async fn project_open(
 pub async fn project_close(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
     state.close(&id).await
 }
+#[tauri::command]
+pub async fn project_restart(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<ProjectInfo, String> {
+    state.restart(&id).await
+}
+
 
 #[tauri::command]
 pub async fn projects_restore(state: State<'_, ProjectsState>) -> Result<Vec<ProjectInfo>, String> {
@@ -65,6 +73,12 @@ pub async fn omp_abort(state: State<'_, ProjectsState>, id: String) -> Result<()
 pub async fn omp_get_state(state: State<'_, ProjectsState>, id: String) -> Result<Value, String> {
     let project = state.get_project(&id).await?;
     project.session.get_state().await
+}
+
+#[tauri::command]
+pub async fn omp_get_stderr(state: State<'_, ProjectsState>, id: String) -> Result<Vec<String>, String> {
+    let project = state.get_project(&id).await?;
+    Ok(project.session.stderr_tail())
 }
 
 #[tauri::command]

@@ -11,6 +11,13 @@
 
   let text = $state('');
   let textareaRef = $state<HTMLTextAreaElement | null>(null);
+  $effect(() => {
+    // Focus textarea when switching to this project or project id changes
+    if (project.id && textareaRef) {
+      textareaRef.focus();
+    }
+  });
+
 
   function handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -61,7 +68,7 @@
       placeholder={project.isStreaming
         ? 'Agent is working… (Enter for follow-up, Ctrl+Enter to steer, Esc to stop)'
         : 'Send a prompt… (Enter to send, Shift+Enter for newline)'}
-      class="w-full h-full bg-[#1e1f22] border border-[#2b2d30] focus:border-[#3574f0] focus:ring-1 focus:ring-[#3574f0] rounded p-2.5 font-mono text-sm text-[#dfe1e5] placeholder-[#6f737a] resize-none outline-none leading-relaxed transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      class="w-full h-full bg-[#1e1f22] border border-[#2b2d30] focus:border-[#3574f0] focus:ring-1 focus:ring-[#3574f0] rounded p-2.5 font-mono text-[13px] text-[#dfe1e5] placeholder-[#6f737a] resize-none outline-none leading-relaxed transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
     ></textarea>
 
     <div class="absolute right-2 bottom-2 flex items-center gap-2">

@@ -270,3 +270,140 @@ async fn test_projects_state_lifecycle() {
     // 5. Clean shutdown
     state.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn test_phase4_full_smoke_multi_tab_workflow() {
+    if !has_omp() {
+        eprintln!("omp binary not found in PATH; skipping Phase 4 smoke test");
+        return;
+    }
+
+    // 1. Setup scratch repo directory with git initialized
+    let temp_root = tempfile::tempdir().expect("failed to create tempdir");
+    let root_path = temp_root.path();
+
+    // Initialize a git repository with an initial commit
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(root_path)
+        .output()
+        .expect("git init failed");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Smoke Test"])
+        .current_dir(root_path)
+        .output()
+        .expect("git config user.name failed");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "smoke@test.local"])
+        .current_dir(root_path)
+        .output()
+        .expect("git config user.email failed");
+
+    let readme_path = root_path.join("README.md");
+    std::fs::write(&readme_path, "# Smoke Test Repo\n").expect("write README");
+    std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(root_path)
+        .output()
+        .expect("git add failed");
+    std::process::Command::new("git")
+        .args(["commit", "-m", "Initial commit"])
+        .current_dir(root_path)
+        .output()
+        .expect("git commit failed");
+
+    // Create tab 2 and tab 3 dirs
+    let dir2 = tempfile::tempdir().expect("failed to create tempdir 2");
+    let dir3 = tempfile::tempdir().expect("failed to create tempdir 3");
+
+    let state = ProjectsState::new();
+
+    // 2. Multi-tab creation: open 3 tabs
+    let tab1 = state.open(root_path.to_str().unwrap()).await.expect("open tab 1");
+    let tab2 = state.open(dir2.path().to_str().unwrap()).await.expect("open tab 2");
+    let tab3 = state.open(dir3.path().to_str().unwrap()).await.expect("open tab 3");
+
+    assert!(!tab1.id.is_empty());
+    assert!(!tab2.id.is_empty());
+    assert!(!tab3.id.is_empty());
+
+    // 3. Role listing on repository
+    let model_roles = roles::get_model_roles(root_path).await.expect("get_model_roles");
+    let chat_roles = roles::get_chat_roles(&model_roles);
+    assert!(!chat_roles.is_empty(), "Chat roles list should not be empty");
+
+    // 4. Git status on repository
+    let git_st = bide_lib::git::git_status(root_path).await.expect("git_status failed");
+    assert!(git_st.staged.is_empty());
+    assert!(git_st.unstaged.is_empty());
+    assert!(git_st.untracked.is_empty());
+
+    // Create a new untracked file and verify git_status picks it up
+    let new_file = root_path.join("new_file.txt");
+    std::fs::write(&new_file, "smoke content\n").expect("write new_file");
+    let git_st_after = bide_lib::git::git_status(root_path).await.expect("git_status after write");
+    assert!(git_st_after.untracked.iter().any(|f| f == "new_file.txt"));
+
+    // Stage new file and commit
+    bide_lib::git::git_stage(root_path, "new_file.txt").await.expect("stage new file");
+    bide_lib::git::git_commit(root_path, "Add new_file.txt").await.expect("commit new file");
+    let git_st_clean = bide_lib::git::git_status(root_path).await.expect("git_status clean");
+    assert!(git_st_clean.staged.is_empty());
+    assert!(git_st_clean.unstaged.is_empty());
+
+    // 5. Concurrent prompts across sessions
+    let p1 = state.get_project(&tab1.id).await.expect("get tab 1");
+    let p2 = state.get_project(&tab2.id).await.expect("get tab 2");
+    let p3 = state.get_project(&tab3.id).await.expect("get tab 3");
+
+    let rx1 = p1.session.subscribe_broadcast();
+    let rx2 = p2.session.subscribe_broadcast();
+    let rx3 = p3.session.subscribe_broadcast();
+
+    let prompt1 = {
+        let s = p1.session.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(60), s.prompt("echo tab1", None)).await
+        })
+    };
+    let prompt2 = {
+        let s = p2.session.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(60), s.prompt("echo tab2", None)).await
+        })
+    };
+    let prompt3 = {
+        let s = p3.session.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(60), s.prompt("echo tab3", None)).await
+        })
+    };
+
+    let (r1, r2, r3) = tokio::join!(prompt1, prompt2, prompt3);
+    assert!(r1.is_ok());
+    assert!(r2.is_ok());
+    assert!(r3.is_ok());
+
+    // Wait for settlement
+    let wait_settle = |mut rx: broadcast::Receiver<Value>| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(f)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                if f.get("type").and_then(|t| t.as_str()) == Some("session_settled") {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    let (s1, s2, s3) = tokio::join!(wait_settle(rx1), wait_settle(rx2), wait_settle(rx3));
+    assert!(s1 && s2 && s3, "All three tabs should settle");
+
+    // 6. Test project restart
+    let restarted = state.restart(&tab1.id).await.expect("restart tab 1");
+    assert_eq!(restarted.id, tab1.id);
+
+    // 7. Clean shutdown of all tabs
+    state.shutdown_all().await;
+}

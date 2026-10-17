@@ -13,7 +13,7 @@
     <span>Last Prompt</span>
   </div>
 
-  <div class="flex-1 p-3 font-mono text-xs overflow-y-auto leading-relaxed">
+  <div class="flex-1 p-3 font-mono text-[13px] overflow-y-auto leading-relaxed">
     {#if project.lastPrompt}
       <div class="flex items-start gap-2">
         <span class="text-[#3574f0] select-none font-bold">&gt;</span>
