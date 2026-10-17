@@ -1,51 +1,50 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { open } from '@tauri-apps/plugin-dialog';
-  import { Plus, FolderOpen } from 'lucide-svelte';
+  import { projectsStore } from './lib/stores/projects.svelte';
+  import TabBar from './lib/components/TabBar.svelte';
+  import ProjectView from './lib/components/ProjectView.svelte';
+  import UiRequestDialog from './lib/components/UiRequestDialog.svelte';
+  import UpdateModal from './lib/components/UpdateModal.svelte';
+  import { FolderOpen, Plus } from 'lucide-svelte';
 
-  let selectedFolder = $state<string | null>(null);
-  let statusMessage = $state<string>('Ready');
+  let updateModalOpen = $state(false);
 
-  async function handleNewTab() {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Open Project Directory',
-      });
-      if (selected && typeof selected === 'string') {
-        selectedFolder = selected;
-        statusMessage = `Opened project directory: ${selected}`;
+  function handleKeyDown(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 't') {
+      e.preventDefault();
+      projectsStore.openProject();
+    } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'w') {
+      if (projectsStore.activeProjectId) {
+        e.preventDefault();
+        projectsStore.closeProject(projectsStore.activeProjectId);
       }
-    } catch (err) {
-      console.error('Failed to open project folder:', err);
-      statusMessage = `Failed to open directory: ${err}`;
     }
   }
 
-  function handleCloseTab() {
-    selectedFolder = null;
-    statusMessage = 'Project tab closed';
-  }
-
   onMount(() => {
-    let unlisten: (() => void) | undefined;
+    projectsStore.restoreProjects();
 
+    let unlisten: (() => void) | undefined;
     listen<string>('menu', (event) => {
       const menuId = event.payload;
       if (menuId === 'new_tab') {
-        handleNewTab();
+        projectsStore.openProject();
       } else if (menuId === 'close_tab') {
-        handleCloseTab();
+        if (projectsStore.activeProjectId) {
+          projectsStore.closeProject(projectsStore.activeProjectId);
+        }
       } else if (menuId === 'update_omp') {
-        statusMessage = 'Update omp requested from menu';
+        updateModalOpen = true;
       }
     }).then((fn) => {
       unlisten = fn;
     });
 
+    window.addEventListener('keydown', handleKeyDown);
+
     return () => {
+      window.removeEventListener('keydown', handleKeyDown);
       if (unlisten) {
         unlisten();
       }
@@ -53,58 +52,47 @@
   });
 </script>
 
-<main class="flex h-screen w-screen flex-col bg-[#1e1f22] text-[#dfe1e5] select-none font-sans">
-  <!-- Tab bar -->
-  <div class="flex h-9 items-center border-b border-[#2b2d30] bg-[#2b2d30] px-2 gap-1 text-[13px]">
-    {#if selectedFolder}
-      <div class="flex items-center gap-2 px-3 py-1 bg-[#1e1f22] border-t-2 border-t-[#3574f0] text-[#dfe1e5] rounded-t text-xs">
-        <span class="inline-block h-2 w-2 rounded-full bg-[#59a869]"></span>
-        <span class="font-medium truncate max-w-xs">{selectedFolder.split('/').filter(Boolean).pop() || selectedFolder}</span>
-        <button
-          type="button"
-          class="ml-1 text-[#6f737a] hover:text-[#dfe1e5] transition-colors"
-          onclick={handleCloseTab}
-          aria-label="Close Tab"
-        >
-          ×
-        </button>
-      </div>
-    {:else}
-      <div class="text-[#6f737a] italic text-xs px-2">No open projects</div>
-    {/if}
+<main class="flex h-screen w-screen flex-col bg-[#1e1f22] text-[#dfe1e5] select-none font-sans overflow-hidden">
+  <!-- Top Tab Bar -->
+  <TabBar />
 
-    <button
-      type="button"
-      onclick={handleNewTab}
-      class="flex h-6 w-6 items-center justify-center rounded text-[#868a91] hover:bg-[#35373c] hover:text-[#dfe1e5] transition-colors"
-      title="New Project Tab (Ctrl+T)"
-      aria-label="New Project Tab"
-    >
-      <Plus size={15} />
-    </button>
-  </div>
-
-  <!-- Content area placeholder -->
-  <div class="flex flex-1 items-center justify-center bg-[#1e1f22] p-6 text-center">
-    {#if selectedFolder}
-      <div class="flex flex-col items-center gap-2">
-        <div class="text-sm text-[#bcbec4]">Active Project:</div>
-        <div class="font-mono text-xs bg-[#252629] border border-[#2b2d30] px-3 py-1.5 rounded text-[#dfe1e5]">
-          {selectedFolder}
-        </div>
-      </div>
+  <!-- Main View -->
+  <div class="flex-1 w-full overflow-hidden relative">
+    {#if projectsStore.activeProject}
+      <ProjectView project={projectsStore.activeProject} />
+      <UiRequestDialog project={projectsStore.activeProject} />
     {:else}
-      <div class="flex flex-col items-center gap-3 text-[#6f737a]">
-        <FolderOpen size={40} class="stroke-1 text-[#43454a]" />
-        <div class="text-sm">
-          Click <kbd class="px-1.5 py-0.5 text-xs bg-[#252629] border border-[#2b2d30] rounded text-[#bcbec4]">+</kbd> or press <kbd class="px-1.5 py-0.5 text-xs bg-[#252629] border border-[#2b2d30] rounded text-[#bcbec4]">Ctrl+T</kbd> to open a project directory
+      <!-- Empty State when no tabs open -->
+      <div class="h-full w-full flex flex-col items-center justify-center p-8 text-center text-[#bcbec4]">
+        <div class="flex flex-col items-center max-w-sm gap-4">
+          <div class="w-16 h-16 rounded-2xl bg-[#252629] border border-[#2b2d30] flex items-center justify-center text-[#3574f0] shadow-lg">
+            <FolderOpen class="w-8 h-8" />
+          </div>
+
+          <div class="space-y-1">
+            <h2 class="text-base font-semibold text-[#dfe1e5]">No Project Open</h2>
+            <p class="text-xs text-[#6f737a] leading-relaxed">
+              Open a project directory to launch an omp agent session and start working.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onclick={() => projectsStore.openProject()}
+            class="flex items-center gap-2 px-4 py-2 rounded bg-[#3574f0] hover:bg-[#3574f0]/90 text-white font-medium text-xs transition-colors shadow-sm cursor-pointer"
+          >
+            <Plus class="w-4 h-4" />
+            <span>Open Project Directory</span>
+          </button>
+
+          <div class="text-[11px] text-[#6f737a] font-mono">
+            Press <kbd class="px-1.5 py-0.5 rounded bg-[#2b2d30] border border-[#393b40] text-[#dfe1e5]">Ctrl+T</kbd> to open
+          </div>
         </div>
       </div>
     {/if}
   </div>
 
-  <!-- Status bar -->
-  <div class="flex h-6 items-center border-t border-[#2b2d30] bg-[#252629] px-3 text-[11px] text-[#868a91]">
-    <span>{statusMessage}</span>
-  </div>
+  <!-- Update omp Modal -->
+  <UpdateModal open={updateModalOpen} onClose={() => (updateModalOpen = false)} />
 </main>
