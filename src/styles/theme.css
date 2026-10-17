@@ -1,0 +1,75 @@
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+@theme {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, monospace;
+
+  --color-bg-base: var(--bg-base);
+  --color-bg-tab: var(--bg-tab);
+  --color-bg-tab-active: var(--bg-tab-active);
+  --color-bg-tab-hover: var(--bg-tab-hover);
+  --color-bg-secondary: var(--bg-secondary);
+  --color-bg-tool-header: var(--bg-tool-header);
+  --color-bg-input: var(--bg-input);
+
+  --color-border: var(--border-color);
+  --color-border-subtle: var(--border-subtle);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-accent-blue: var(--accent-blue);
+  --color-status-green: var(--status-green);
+  --color-status-red: var(--status-red);
+  --color-status-yellow: var(--status-yellow);
+}
+
+:root {
+  /* IntelliJ New UI Dark / Darcula Palette */
+  --bg-base: #1e1f22;
+  --bg-tab: #2b2d30;
+  --bg-tab-active: #1e1f22;
+  --bg-tab-hover: #35373c;
+  --bg-secondary: #252629;
+  --bg-tool-header: #2b2d30;
+  --bg-input: #1e1f22;
+
+  --border-color: #2b2d30;
+  --border-subtle: #393b40;
+
+  --text-primary: #dfe1e5;
+  --text-secondary: #bcbec4;
+  --text-muted: #6f737a;
+
+  --accent-blue: #3574f0;
+  --status-green: #59a869;
+  --status-red: #e55765;
+  --status-yellow: #e2a53b;
+
+  color-scheme: dark;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  background-color: var(--bg-base);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+code, pre, kbd, samp {
+  font-family: var(--font-mono);
+}
