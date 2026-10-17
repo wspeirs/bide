@@ -1,0 +1,8 @@
+{"type": "extension_ui_request", "id": "15a9ea329b3c39cf", "method": "setStatus", "statusKey": "caveman", "statusText": ""}
+{"type": "extension_ui_request", "id": "15a9ea329b3c39d0", "method": "notify", "message": "Caveman loaded: off", "notifyType": "info"}
+{"type": "extension_ui_request", "id": "15a9ea32a47c39d1", "method": "setStatus", "statusKey": "combo", "statusText": "\u001b[38;2;0;180;255m\ud83e\udde9\u001b[39m \u001b[38;2;156;163;176mcombo: MEDIUM \u00b7 caveman=LITE \u00b7 rtk=ON \u00b7 ponytail=LITE\u001b[39m"}
+{"type": "extension_ui_request", "id": "15a9ea32a47c39d2", "method": "setStatus", "statusKey": "rtk", "statusText": "\u25cf \u001b[38;2;156;163;176mrtk: ON\u001b[39m"}
+{"type": "extension_ui_request", "id": "15a9ea32a47c39d3", "method": "notify", "message": "RTK loaded: on", "notifyType": "info"}
+{"type": "extension_ui_request", "id": "15a9ea32a47c39d4", "method": "setStatus", "statusKey": "ponytail", "statusText": "\u001b[38;2;107;114;128m\u25cb\u001b[39m \ud83d\udc34 \u001b[38;2;156;163;176mponytail: \u001b[39m\u001b[39m\ud83c\udf3f LITE\u001b[39m"}
+{"type": "extension_ui_request", "id": "15a9ea32a47c39d5", "method": "notify", "message": "Ponytail loaded: lite", "notifyType": "info"}
+{"type": "extension_ui_request", "id": "15a9ea32a47c39d6", "method": "setWidget", "widgetKey": "autoresearch"}

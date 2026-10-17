@@ -1,0 +1,4 @@
+{"type": "prompt_result", "id": "pr", "agentInvoked": true, "status": "completed", "sessionSettled": true}
+{"type": "session_settled"}
+{"type": "prompt_result", "id": "rev", "agentInvoked": true, "status": "aborted", "sessionSettled": true}
+{"type": "session_settled"}

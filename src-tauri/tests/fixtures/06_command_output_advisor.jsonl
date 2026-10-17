@@ -1,0 +1,8 @@
+{"type": "advisor_cost_changed"}
+{"type": "model_changed"}
+{"type": "thinking_level_changed", "thinkingLevel": "low"}
+{"type": "command_output", "text": "Advisor enabled."}
+{"type": "command_output", "text": "Advisor is enabled (anthropic/claude-sonnet-5-5). Context: 0 / 1,000,000 tokens (0%). Spend: 0 input, 0 output, $0.0000."}
+{"type": "notice", "level": "info", "message": "xd://: mounted mcp__context7_query_docs, mcp__context7_resolve_library_id, mcp__duckdb_execute_query, mcp__duckdb_list_columns, mcp__duckdb_list_databases, mcp__duckdb_list_tables, mcp__duckdb_switch_database_connection", "source": "xdev"}
+{"type": "advisor_yielded"}
+{"type": "advisor_yielded"}

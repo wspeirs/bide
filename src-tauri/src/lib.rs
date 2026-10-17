@@ -1,3 +1,8 @@
+pub mod commands;
+pub mod omp;
+pub mod persist;
+pub mod projects;
+pub mod roles;
 use tauri::{
     menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
     Emitter,
@@ -56,22 +61,63 @@ fn create_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Me
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let projects_state = projects::ProjectsState::new();
+    let projects_state_menu = projects_state.clone();
+    let projects_state_window = projects_state.clone();
+    let projects_state_shutdown = projects_state.clone();
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(projects_state)
+        .invoke_handler(tauri::generate_handler![
+            commands::project_open,
+            commands::project_close,
+            commands::projects_restore,
+            commands::omp_subscribe,
+            commands::omp_prompt,
+            commands::omp_abort,
+            commands::omp_get_state,
+            commands::omp_new_session,
+            commands::omp_command,
+            commands::omp_ui_respond,
+            commands::omp_list_roles,
+            commands::omp_set_role,
+        ])
         .setup(|app| {
             let menu = create_menu(app.handle())?;
             app.set_menu(menu)?;
             Ok(())
         })
-        .on_menu_event(|app, event| {
+        .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             let _ = app.emit("menu", id);
             if id == "quit" {
+                let ps = projects_state_menu.clone();
+                tauri::async_runtime::block_on(async move {
+                    ps.shutdown_all().await;
+                });
                 app.exit(0);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running bide application");
+        .on_window_event(move |_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let ps = projects_state_window.clone();
+                tauri::async_runtime::block_on(async move {
+                    ps.shutdown_all().await;
+                });
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building bide application");
+
+    app.run(move |_app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
+            let ps = projects_state_shutdown.clone();
+            tauri::async_runtime::block_on(async move {
+                ps.shutdown_all().await;
+            });
+        }
+    });
 }
 
 #[cfg(test)]

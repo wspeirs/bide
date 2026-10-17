@@ -1,0 +1,1 @@
+{"type": "extension_ui_request", "id": "15a9ea35563c39d7", "method": "select", "title": "Review Mode", "options": ["1. Review against a base branch (PR Style)", "2. Review uncommitted changes", "3. Review a specific commit", "4. Review a specific PR", "5. Custom review instructions"]}

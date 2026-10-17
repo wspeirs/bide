@@ -1,0 +1,10 @@
+{"id": "protocol-1", "type": "negotiate_protocol", "protocolVersion": 2}
+{"id": "r1", "type": "set_event_filter", "events": null, "messageUpdates": "delta"}
+{"id": "r2", "type": "set_ask_dialog", "enabled": true}
+{"id": "r3", "type": "set_model", "provider": "anthropic", "modelId": "claude-sonnet-5-5"}
+{"id": "r4", "type": "set_thinking_level", "level": "low"}
+{"id": "r5", "type": "prompt", "message": "/advisor on"}
+{"id": "r6", "type": "prompt", "message": "/review"}
+{"type": "extension_ui_response", "id": "<request id>", "value": "2. Review uncommitted changes"}
+{"id": "r7", "type": "new_session"}
+{"id": "r8", "type": "abort"}
