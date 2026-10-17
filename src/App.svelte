@@ -13,18 +13,6 @@
   function handleKeyDown(e: KeyboardEvent) {
     const isMod = e.ctrlKey || e.metaKey;
 
-    if (isMod && e.key.toLowerCase() === 't') {
-      e.preventDefault();
-      projectsStore.openProject();
-      return;
-    }
-
-    if (isMod && e.key.toLowerCase() === 'w') {
-      e.preventDefault();
-      projectsStore.closeActiveProject();
-      return;
-    }
-
     // Ctrl+1 through Ctrl+9: switch to tab 1 through 9
     if (isMod && e.key >= '1' && e.key <= '9') {
       const index = parseInt(e.key, 10) - 1;
