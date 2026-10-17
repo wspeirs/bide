@@ -1,11 +1,13 @@
-use std::sync::Arc;
 use serde_json::Value;
+use std::sync::Arc;
 use tauri::State;
 
 use crate::{
+    git::{self, GitStatus},
     persist,
     projects::{ProjectInfo, ProjectsState},
     roles::{self, RoleInfo},
+    update::{self, UpdateReport},
 };
 
 #[tauri::command]
@@ -17,17 +19,12 @@ pub async fn project_open(
 }
 
 #[tauri::command]
-pub async fn project_close(
-    state: State<'_, ProjectsState>,
-    id: String,
-) -> Result<(), String> {
+pub async fn project_close(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
     state.close(&id).await
 }
 
 #[tauri::command]
-pub async fn projects_restore(
-    state: State<'_, ProjectsState>,
-) -> Result<Vec<ProjectInfo>, String> {
+pub async fn projects_restore(state: State<'_, ProjectsState>) -> Result<Vec<ProjectInfo>, String> {
     state.restore().await
 }
 
@@ -59,28 +56,19 @@ pub async fn omp_prompt(
 }
 
 #[tauri::command]
-pub async fn omp_abort(
-    state: State<'_, ProjectsState>,
-    id: String,
-) -> Result<(), String> {
+pub async fn omp_abort(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
     let project = state.get_project(&id).await?;
     project.session.abort().await.map(|_| ())
 }
 
 #[tauri::command]
-pub async fn omp_get_state(
-    state: State<'_, ProjectsState>,
-    id: String,
-) -> Result<Value, String> {
+pub async fn omp_get_state(state: State<'_, ProjectsState>, id: String) -> Result<Value, String> {
     let project = state.get_project(&id).await?;
     project.session.get_state().await
 }
 
 #[tauri::command]
-pub async fn omp_new_session(
-    state: State<'_, ProjectsState>,
-    id: String,
-) -> Result<Value, String> {
+pub async fn omp_new_session(state: State<'_, ProjectsState>, id: String) -> Result<Value, String> {
     let project = state.get_project(&id).await?;
     let res = project.session.new_session().await?;
     if let Some(sf) = project.session.session_file() {
@@ -136,4 +124,86 @@ pub async fn omp_set_role(
     role: String,
 ) -> Result<Value, String> {
     state.set_role(&id, &role).await
+}
+
+#[tauri::command]
+pub async fn git_status(state: State<'_, ProjectsState>, id: String) -> Result<GitStatus, String> {
+    let p = state.get_project(&id).await?;
+    git::git_status(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_stage(
+    state: State<'_, ProjectsState>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_stage(&p.dir, &path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_unstage(
+    state: State<'_, ProjectsState>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_unstage(&p.dir, &path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_add_all(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_add_all(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_commit(
+    state: State<'_, ProjectsState>,
+    id: String,
+    msg: String,
+) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_commit(&p.dir, &msg)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_push(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_push(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_pull(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_pull(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_fetch(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_fetch(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_status_text(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<String, String> {
+    let p = state.get_project(&id).await?;
+    git::git_status_text(&p.dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn app_update(state: State<'_, ProjectsState>) -> Result<UpdateReport, String> {
+    Ok(update::app_update(&state).await)
 }

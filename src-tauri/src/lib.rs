@@ -1,8 +1,10 @@
 pub mod commands;
+pub mod git;
 pub mod omp;
 pub mod persist;
 pub mod projects;
 pub mod roles;
+pub mod update;
 use tauri::{
     menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
     Emitter,
@@ -64,6 +66,7 @@ pub fn run() {
     let projects_state = projects::ProjectsState::new();
     let projects_state_menu = projects_state.clone();
     let projects_state_window = projects_state.clone();
+    let projects_state_fetch = projects_state.clone();
     let projects_state_shutdown = projects_state.clone();
 
     let app = tauri::Builder::default()
@@ -82,8 +85,19 @@ pub fn run() {
             commands::omp_ui_respond,
             commands::omp_list_roles,
             commands::omp_set_role,
+            commands::git_status,
+            commands::git_stage,
+            commands::git_unstage,
+            commands::git_add_all,
+            commands::git_commit,
+            commands::git_push,
+            commands::git_pull,
+            commands::git_fetch,
+            commands::git_status_text,
+            commands::app_update,
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            tauri::async_runtime::spawn(projects_state_fetch.hourly_fetch());
             let menu = create_menu(app.handle())?;
             app.set_menu(menu)?;
             Ok(())

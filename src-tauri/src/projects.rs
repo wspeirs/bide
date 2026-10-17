@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ pub struct Project {
     pub orchestrate: bool,
     pub role: String,
     pub advisor: bool,
+    pub restart_pending: Arc<AtomicBool>,
     pub channels: Arc<Mutex<Vec<tauri::ipc::Channel<serde_json::Value>>>>,
 }
 
@@ -80,10 +81,14 @@ impl ProjectsState {
             orchestrate: false,
             role: "default".to_string(),
             advisor: false,
+            restart_pending: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(Vec::new())),
         });
 
-        self.projects.lock().await.insert(id.clone(), project.clone());
+        self.projects
+            .lock()
+            .await
+            .insert(id.clone(), project.clone());
 
         let mut config = persist::load();
         config.tabs.push(TabConfig {
@@ -171,10 +176,14 @@ impl ProjectsState {
                 orchestrate: tab.orchestrate,
                 role: tab.role.clone(),
                 advisor: tab.advisor,
+                restart_pending: Arc::new(AtomicBool::new(false)),
                 channels: Arc::new(Mutex::new(Vec::new())),
             });
 
-            self.projects.lock().await.insert(tab.id.clone(), project.clone());
+            self.projects
+                .lock()
+                .await
+                .insert(tab.id.clone(), project.clone());
             restored.push(ProjectInfo::from(&*project));
         }
 
@@ -231,6 +240,7 @@ impl ProjectsState {
             orchestrate: existing.orchestrate,
             role: existing.role.clone(),
             advisor: existing.advisor,
+            restart_pending: existing.restart_pending.clone(),
             channels: existing.channels.clone(),
         });
 
@@ -297,7 +307,11 @@ impl ProjectsState {
             *proj = arc.clone();
             arc
         };
-        let slash = if advisor { "/advisor on" } else { "/advisor off" };
+        let slash = if advisor {
+            "/advisor on"
+        } else {
+            "/advisor off"
+        };
         project.session.command(slash).await?;
         let mut config = persist::load();
         if let Some(tab) = config.tabs.iter_mut().find(|t| t.id == id) {
