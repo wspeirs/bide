@@ -207,6 +207,53 @@ pub async fn git_fetch(state: State<'_, ProjectsState>, id: String) -> Result<()
 }
 
 #[tauri::command]
+pub async fn git_init(state: State<'_, ProjectsState>, id: String) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_init(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct DirEntry {
+    name: String,
+    is_dir: bool,
+}
+
+/// List one directory of the project (`rel` is relative to the project root, "" for root).
+/// Directories first, then files, case-insensitive; `.git` is hidden.
+#[tauri::command]
+pub async fn fs_list_dir(
+    state: State<'_, ProjectsState>,
+    id: String,
+    rel: String,
+) -> Result<Vec<DirEntry>, String> {
+    use std::path::Component;
+    let rel_path = std::path::Path::new(&rel);
+    if !rel_path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return Err("invalid path".to_string());
+    }
+    let p = state.get_project(&id).await?;
+    let mut rd = tokio::fs::read_dir(p.dir.join(rel_path))
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(e) = rd.next_entry().await.map_err(|e| e.to_string())? {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
+        }
+        // metadata() follows symlinks, so a symlink to a dir counts as a dir
+        let is_dir = tokio::fs::metadata(e.path()).await.map(|m| m.is_dir()).unwrap_or(false);
+        out.push(DirEntry { name, is_dir });
+    }
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
+}
+
+#[tauri::command]
 pub async fn git_status_text(
     state: State<'_, ProjectsState>,
     id: String,

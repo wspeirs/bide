@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { projectsStore } from '../stores/projects.svelte';
   import type { ProjectState, RoleInfo } from '../types';
-  import { Zap, Shield, RotateCcw, Square, Check, ChevronDown, Sparkles } from 'lucide-svelte';
+  import { Users, Shield, RotateCcw, Square, Check, ChevronDown, Sparkles } from 'lucide-svelte';
 
   interface Props {
     project: ProjectState;
@@ -12,6 +12,16 @@
 
   let roles = $state<RoleInfo[]>([]);
   let isRoleMenuOpen = $state(false);
+  let menuPos = $state({ left: 0, bottom: 0 });
+
+  // Fixed position so the pane's overflow-hidden can't clip the menu.
+  function toggleRoleMenu(e: MouseEvent) {
+    isRoleMenuOpen = !isRoleMenuOpen;
+    if (!isRoleMenuOpen) return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    menuPos = { left: r.left, bottom: window.innerHeight - r.top + 4 };
+    loadRoles();
+  }
 
   async function loadRoles() {
     roles = await projectsStore.listRoles(project.id);
@@ -50,7 +60,7 @@
 
 <div class="relative flex items-center justify-between px-3 py-1.5 bg-[#252629] border-t border-b border-[#2b2d30] text-xs font-sans select-none shrink-0">
   <div class="flex items-center gap-1.5 flex-wrap">
-    <!-- [⚡ Orch] toggle button -->
+    <!-- [Orchestrate] toggle button -->
     <button
       type="button"
       onclick={toggleOrchestrate}
@@ -59,18 +69,15 @@
         ? 'bg-[#3574f0]/20 text-[#3574f0] border-[#3574f0]'
         : 'bg-[#1e1f22] text-[#bcbec4] border-[#393b40] hover:bg-[#2b2d30] hover:text-[#dfe1e5]'}"
     >
-      <Zap class="w-3.5 h-3.5" />
-      <span>Orch</span>
+      <Users class="w-3.5 h-3.5" />
+      <span>Orchestrate</span>
     </button>
 
     <!-- [Role: <current> ▾] dropdown -->
     <div class="relative">
       <button
         type="button"
-        onclick={() => {
-          isRoleMenuOpen = !isRoleMenuOpen;
-          if (isRoleMenuOpen) loadRoles();
-        }}
+        onclick={toggleRoleMenu}
         title="Select model role"
         class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-xs font-medium cursor-pointer"
       >
@@ -80,7 +87,7 @@
 
       {#if isRoleMenuOpen}
         <button type="button" class="fixed inset-0 z-40 cursor-default bg-transparent border-none p-0 outline-none" onclick={() => (isRoleMenuOpen = false)} aria-label="Close menu"></button>
-        <div class="absolute left-0 bottom-full mb-1 z-50 w-52 bg-[#1e1f22] border border-[#393b40] rounded shadow-xl py-1 max-h-60 overflow-y-auto font-sans text-xs">
+        <div style="left: {menuPos.left}px; bottom: {menuPos.bottom}px" class="fixed z-50 w-max min-w-52 max-w-[min(36rem,calc(100vw-1rem))] bg-[#1e1f22] border border-[#393b40] rounded shadow-xl py-1 max-h-60 overflow-y-auto font-sans text-xs">
           {#if roles.length === 0}
             <div class="px-3 py-1.5 text-[#6f737a] italic">Loading roles…</div>
           {:else}
@@ -93,7 +100,7 @@
                 <div class="flex flex-col truncate">
                   <span class="font-medium {r.name === project.role ? 'text-[#3574f0]' : ''}">{r.name}</span>
                   {#if r.selector}
-                    <span class="text-[10px] text-[#6f737a] truncate">{r.selector}</span>
+                    <span class="text-[12px] text-[#6f737a] truncate">{r.selector}</span>
                   {/if}
                 </div>
                 {#if r.name === project.role}

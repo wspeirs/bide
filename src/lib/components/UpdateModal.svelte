@@ -93,12 +93,12 @@
                   {/if}
                 </div>
                 {#if report.restartsTriggered.length > 0}
-                  <div class="text-[11px] text-[#bcbec4] mt-1">
+                  <div class="text-[13px] text-[#bcbec4] mt-1">
                     Restarts triggered: {report.restartsTriggered.length} tab(s)
                   </div>
                 {/if}
                 {#if report.restartsPending.length > 0}
-                  <div class="text-[11px] text-[#e2a53b] mt-0.5">
+                  <div class="text-[13px] text-[#e2a53b] mt-0.5">
                     Restarts pending: {report.restartsPending.length} active tab(s) will restart after turn settles
                   </div>
                 {/if}
@@ -110,7 +110,7 @@
               <div>
                 <div class="font-medium text-[#e55765]">Update Failed</div>
                 {#if report.error}
-                  <div class="text-[11px] text-[#bcbec4] mt-1">{report.error}</div>
+                  <div class="text-[13px] text-[#bcbec4] mt-1">{report.error}</div>
                 {/if}
               </div>
             </div>
@@ -119,8 +119,8 @@
           <!-- Output logs -->
           {#if report.output}
             <div class="space-y-1">
-              <span class="text-[11px] text-[#6f737a] uppercase font-mono">Output</span>
-              <pre class="p-2.5 rounded bg-[#252629] border border-[#2b2d30] font-mono text-[11px] text-[#bcbec4] whitespace-pre-wrap max-h-48 overflow-y-auto m-0 leading-relaxed">{report.output}</pre>
+              <span class="text-[13px] text-[#6f737a] uppercase font-mono">Output</span>
+              <pre class="p-2.5 rounded bg-[#252629] border border-[#2b2d30] font-mono text-[13px] text-[#bcbec4] whitespace-pre-wrap max-h-48 overflow-y-auto m-0 leading-relaxed">{report.output}</pre>
             </div>
           {/if}
         {/if}

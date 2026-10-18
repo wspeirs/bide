@@ -6,6 +6,8 @@
 @import "@fontsource/jetbrains-mono/500.css";
 
 @theme {
+  --text-xs: 14px;
+  --text-lg: 20px;
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, monospace;
 
@@ -62,7 +64,7 @@ html, body {
   width: 100%;
   overflow: hidden;
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.4;
   color: var(--text-primary);
   background-color: var(--bg-base);
@@ -72,4 +74,26 @@ html, body {
 
 code, pre, kbd, samp {
   font-family: var(--font-mono);
+}
+
+/* Pane dividers: a 6px line plus an invisible ±6px grab zone so the resize cursor is easy to hit. */
+[data-pane-resizer] {
+  position: relative;
+  z-index: 10;
+}
+[data-pane-resizer]::after {
+  content: '';
+  position: absolute;
+}
+[data-pane-resizer][data-direction='horizontal'] {
+  width: 6px;
+}
+[data-pane-resizer][data-direction='horizontal']::after {
+  inset: 0 -6px;
+}
+[data-pane-resizer][data-direction='vertical'] {
+  height: 6px;
+}
+[data-pane-resizer][data-direction='vertical']::after {
+  inset: -6px 0;
 }

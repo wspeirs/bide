@@ -161,6 +161,9 @@ pub async fn git_pull(dir: &Path) -> Result<(), GitError> {
 pub async fn git_fetch(dir: &Path) -> Result<(), GitError> {
     run(dir, &["fetch", "--prune"]).await.map(drop)
 }
+pub async fn git_init(dir: &Path) -> Result<(), GitError> {
+    run(dir, &["init", "."]).await.map(drop)
+}
 pub async fn git_status_text(dir: &Path) -> Result<String, GitError> {
     run(dir, &["status"]).await
 }

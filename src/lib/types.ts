@@ -9,6 +9,17 @@ export interface ActivityItem {
   args?: Record<string, unknown> | unknown;
   time?: string;
   isError?: boolean;
+  /** Tool call id from omp (links toolcall_end / tool_execution_* frames). */
+  callId?: string;
+  /** Position of the tool call in the assistant message, used before the id is known. */
+  contentIndex?: number;
+  /** generating: model is still writing the call; running: executing; done: finished. */
+  phase?: 'generating' | 'running' | 'done';
+  /** Characters of tool arguments streamed so far (generation progress). */
+  argsChars?: number;
+  /** ms epoch */
+  startedAt?: number;
+  endedAt?: number;
 }
 
 export interface GitFileStatus {
@@ -53,6 +64,14 @@ export interface UiRequest {
   defaultValue?: string;
 }
 
+export interface DebugEntry {
+  id: number;
+  time: string;
+  dir: 'in' | 'out';
+  kind: string;
+  json: string;
+}
+
 export interface ProjectInfo {
   id: string;
   dir: string;
@@ -72,7 +91,6 @@ export interface ProjectState {
   role: string;
   advisor: boolean;
   lastPrompt: string | null;
-  thinking: string;
   activityLog: ActivityItem[];
   isStreaming: boolean;
   model: string;
@@ -81,4 +99,6 @@ export interface ProjectState {
   gitStatus: GitStatus | null;
   lastFetched: Date | null;
   errorStderr: string | null;
+  debugLog: DebugEntry[];
+  debugOpen: boolean;
 }

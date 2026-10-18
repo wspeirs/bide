@@ -134,6 +134,11 @@ impl ProjectsState {
         let mut restored = Vec::new();
 
         for tab in &mut config.tabs {
+            // Already running (e.g. frontend reloaded): reuse the live session.
+            if let Some(p) = self.projects.lock().await.get(&tab.id) {
+                restored.push(ProjectInfo::from(&**p));
+                continue;
+            }
             let dir_path = PathBuf::from(&tab.dir);
             let resume_path = tab
                 .session_file

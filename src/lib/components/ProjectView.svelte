@@ -1,7 +1,8 @@
 <script lang="ts">
   import { PaneGroup, Pane, PaneResizer } from 'paneforge';
   import ErrorBanner from './ErrorBanner.svelte';
-  import CwdBar from './CwdBar.svelte';
+  import StatusBar from './StatusBar.svelte';
+  import DebugPane from './DebugPane.svelte';
   import LastPrompt from './LastPrompt.svelte';
   import ActivityPane from './ActivityPane.svelte';
   import ControlStrip from './ControlStrip.svelte';
@@ -16,8 +17,10 @@
 
   let { project }: Props = $props();
 
+  let promptRef = $state<{ insertAtCursor: (s: string) => void }>();
   function onLeftLayoutChange(sizes: number[]) {
-    if (sizes.length >= 3) {
+    // With the debug pane open there are 4 sizes; don't persist those over the 3-pane layout.
+    if (sizes.length === 3) {
       projectsStore.savePaneSizes({
         left: sizes,
         git: projectsStore.paneSizes.git,
@@ -36,8 +39,6 @@
 </script>
 
 <div class="flex flex-col h-full w-full bg-[#1e1f22] overflow-hidden select-none">
-  <!-- Top CwdBar -->
-  <CwdBar {project} />
   <!-- Error Banner (process exit / error status with last stderr + restart) -->
   <ErrorBanner {project} />
 
@@ -50,6 +51,8 @@
         <PaneGroup direction="vertical" onLayoutChange={onLeftLayoutChange} class="h-full w-full">
           <!-- Top: LastPrompt -->
           <Pane
+            id="left-last-prompt"
+            order={1}
             defaultSize={projectsStore.paneSizes.left[0] ?? 20}
             minSize={8}
             collapsible={true}
@@ -62,19 +65,28 @@
           <PaneResizer class="h-1 bg-[#2b2d30] hover:bg-[#3574f0] transition-colors cursor-row-resize shrink-0" />
 
           <!-- Middle: ActivityPane -->
-          <Pane defaultSize={projectsStore.paneSizes.left[1] ?? 55} minSize={20} class="overflow-hidden">
+          <Pane id="left-activity" order={2} defaultSize={projectsStore.paneSizes.left[1] ?? 55} minSize={20} class="overflow-hidden">
             <ActivityPane {project} />
           </Pane>
 
           <PaneResizer class="h-1 bg-[#2b2d30] hover:bg-[#3574f0] transition-colors cursor-row-resize shrink-0" />
 
           <!-- Bottom: ControlStrip + PromptInput -->
-          <Pane defaultSize={projectsStore.paneSizes.left[2] ?? 25} minSize={15} class="overflow-hidden flex flex-col">
+          <Pane id="left-prompt" order={3} defaultSize={projectsStore.paneSizes.left[2] ?? 25} minSize={15} class="overflow-hidden flex flex-col">
             <ControlStrip {project} />
             <div class="flex-1 overflow-hidden">
-              <PromptInput {project} />
+              <PromptInput {project} bind:this={promptRef} />
             </div>
           </Pane>
+
+          {#if project.debugOpen}
+            <PaneResizer class="h-1 bg-[#2b2d30] hover:bg-[#3574f0] transition-colors cursor-row-resize shrink-0" />
+
+            <!-- Debug: JSON-RPC log, under the prompt -->
+            <Pane id="left-debug" order={4} defaultSize={30} minSize={10} class="overflow-hidden">
+              <DebugPane {project} />
+            </Pane>
+          {/if}
         </PaneGroup>
       </Pane>
 
@@ -88,8 +100,11 @@
         maxSize={50}
         class="h-full overflow-hidden"
       >
-        <GitPanel {project} />
+        <GitPanel {project} onPickFile={(p) => promptRef?.insertAtCursor('@' + p)} />
       </Pane>
     </PaneGroup>
   </div>
+
+  <!-- Bottom StatusBar: model, context, run status -->
+  <StatusBar {project} />
 </div>

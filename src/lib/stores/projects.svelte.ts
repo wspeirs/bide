@@ -83,17 +83,17 @@ class ProjectsStore {
       if (!restored || restored.length === 0) return;
 
       for (const info of restored) {
+        if (this.projects.some((p) => p.id === info.id)) continue;
         const project: ProjectState = {
           id: info.id,
           dir: info.dir,
           name: getBasename(info.dir),
-          status: 'starting',
+          status: 'ready',
           restartPending: false,
           orchestrate: info.orchestrate ?? false,
           role: info.role ?? 'default',
           advisor: info.advisor ?? false,
           lastPrompt: null,
-          thinking: '',
           activityLog: [],
           isStreaming: false,
           model: 'loading…',
@@ -102,6 +102,8 @@ class ProjectsStore {
           gitStatus: null,
           lastFetched: null,
           errorStderr: null,
+          debugLog: [],
+          debugOpen: false,
         };
         this.projects.push(project);
         this.setupSubscription(project.id);
@@ -148,13 +150,12 @@ class ProjectsStore {
         id: info.id,
         dir: info.dir,
         name: getBasename(info.dir),
-        status: 'starting',
+        status: 'ready',
         restartPending: false,
         orchestrate: info.orchestrate ?? false,
         role: info.role ?? 'default',
         advisor: info.advisor ?? false,
         lastPrompt: null,
-        thinking: '',
         activityLog: [],
         isStreaming: false,
         model: 'loading…',
@@ -163,6 +164,8 @@ class ProjectsStore {
         gitStatus: null,
         lastFetched: null,
         errorStderr: null,
+        debugLog: [],
+        debugOpen: false,
       };
 
       this.projects.push(project);
@@ -242,12 +245,33 @@ class ProjectsStore {
       console.error(`Failed to subscribe channel for ${id}:`, err);
     });
   }
+  private debugSeq = 0;
+
+  /** Keep a ring buffer of raw RPC frames (both directions) for the debug pane. */
+  private recordDebug(project: ProjectState, frame: Record<string, unknown>, type: string) {
+    const out = type === 'rpc_out';
+    const f = out ? (frame.frame as Record<string, unknown>) : frame;
+    const t = typeof f?.type === 'string' ? f.type : '?';
+    const d = new Date();
+    project.debugLog.push({
+      id: this.debugSeq++,
+      time: `${d.toLocaleTimeString('en-GB')}.${String(d.getMilliseconds()).padStart(3, '0')}`,
+      dir: out ? 'out' : 'in',
+      kind: t === 'response' && typeof f.command === 'string' ? `response:${f.command}` : t,
+      json: JSON.stringify(f),
+    });
+    if (project.debugLog.length > 500) project.debugLog.splice(0, project.debugLog.length - 500);
+  }
+
 
   private handleFrame(id: string, frame: Record<string, unknown>) {
     const project = this.projects.find((p) => p.id === id);
     if (!project) return;
 
     const type = typeof frame.type === 'string' ? frame.type : '';
+    this.recordDebug(project, frame, type);
+    if (type === 'rpc_out') return;
+
 
     switch (type) {
       case 'ready':
@@ -261,72 +285,141 @@ class ProjectsStore {
         project.isStreaming = true;
         break;
 
-      case 'agent_end':
+      case 'agent_end': {
         project.isStreaming = false;
+        // Close anything left open (e.g. aborted turn) so nothing shows as running forever.
+        const now = Date.now();
+        for (const a of project.activityLog) {
+          if (!a.endedAt && (a.type === 'thinking' || a.type === 'tool_call')) a.endedAt = now;
+        }
         this.refreshState(id);
         break;
+      }
 
       case 'message_update': {
         const ev = frame.assistantMessageEvent as Record<string, unknown> | undefined;
-        if (ev && typeof ev.type === 'string') {
-          if (ev.type === 'thinking_delta') {
-            project.thinking += (ev.delta as string) || '';
-          } else if (ev.type === 'text_delta') {
+        if (!ev || typeof ev.type !== 'string') break;
+        const now = Date.now();
+        const log = project.activityLog;
+        // Push, then return the reactive proxy so later mutations trigger updates.
+        const add = (item: ActivityItem) => {
+          log.push(item);
+          return log[log.length - 1];
+        };
+        const last = () => log[log.length - 1];
+        const ci = ev.contentIndex as number | undefined;
+        const partialCall = () => {
+          const content = (ev.partial as Record<string, unknown> | undefined)?.content as
+            | Record<string, unknown>[]
+            | undefined;
+          const c = ci === undefined ? undefined : content?.[ci];
+          return c && c.type === 'toolCall' ? c : undefined;
+        };
+        // The call still being written at this content index.
+        const generating = () =>
+          [...log].reverse().find((a) => a.type === 'tool_call' && a.phase === 'generating' && a.contentIndex === ci);
+
+        switch (ev.type) {
+          case 'thinking_start':
+            add({ id: crypto.randomUUID(), type: 'thinking', text: '', startedAt: now });
+            break;
+
+          case 'thinking_delta': {
+            let t = last();
+            if (!(t && t.type === 'thinking' && !t.endedAt)) {
+              t = add({ id: crypto.randomUUID(), type: 'thinking', text: '', startedAt: now });
+            }
+            t.text = (t.text || '') + ((ev.delta as string) || '');
+            break;
+          }
+
+          case 'thinking_end': {
+            const t = last();
+            if (t && t.type === 'thinking' && !t.endedAt) t.endedAt = now;
+            break;
+          }
+
+          case 'text_delta': {
             const delta = (ev.delta as string) || '';
-            const last = project.activityLog[project.activityLog.length - 1];
-            if (last && last.type === 'text') {
-              last.text = (last.text || '') + delta;
+            const l = last();
+            if (l && l.type === 'text') {
+              l.text = (l.text || '') + delta;
             } else {
-              project.activityLog.push({
-                id: crypto.randomUUID(),
-                type: 'text',
-                text: delta,
-                time: new Date().toLocaleTimeString(),
-              });
+              add({ id: crypto.randomUUID(), type: 'text', text: delta, time: new Date().toLocaleTimeString() });
             }
-          } else if (ev.type === 'toolcall_end' && ev.toolCall) {
-            const tc = ev.toolCall as Record<string, unknown>;
-            const toolId = (tc.id as string) || crypto.randomUUID();
-            const existing = project.activityLog.find((a) => a.id === toolId);
-            if (!existing) {
-              project.activityLog.push({
-                id: toolId,
-                type: 'tool_call',
-                tool: (tc.name as string) || 'tool',
-                intent: (tc.intent as string) || undefined,
-                args: tc.arguments,
-                time: new Date().toLocaleTimeString(),
-              });
+            break;
+          }
+
+          case 'toolcall_start':
+            add({
+              id: crypto.randomUUID(),
+              type: 'tool_call',
+              tool: (partialCall()?.name as string) || 'tool',
+              contentIndex: ci,
+              phase: 'generating',
+              argsChars: 0,
+              startedAt: now,
+            });
+            break;
+
+          case 'toolcall_delta': {
+            const item = generating();
+            if (!item) break;
+            item.argsChars = (item.argsChars || 0) + ((ev.delta as string) || '').length;
+            const pc = partialCall();
+            if (pc) {
+              item.tool = (pc.name as string) || item.tool;
+              item.args = pc.arguments;
+              const a = pc.arguments;
+              if (a && typeof a === 'object' && 'i' in a && typeof a.i === 'string') item.intent = a.i;
             }
+            break;
+          }
+
+          case 'toolcall_end': {
+            const tc = ev.toolCall as Record<string, unknown> | undefined;
+            if (!tc) break;
+            const callId = (tc.id as string) || crypto.randomUUID();
+            const item =
+              generating() ??
+              log.find((a) => a.callId === callId) ??
+              add({ id: crypto.randomUUID(), type: 'tool_call', startedAt: now });
+            item.callId = callId;
+            item.tool = (tc.name as string) || item.tool || 'tool';
+            item.args = tc.arguments;
+            const a = tc.arguments;
+            item.intent =
+              (tc.intent as string) ||
+              (a && typeof a === 'object' && 'i' in a && typeof a.i === 'string' ? a.i : undefined) ||
+              item.intent;
+            item.phase = 'running';
+            break;
           }
         }
         break;
       }
 
       case 'tool_execution_start': {
-        const toolCallId = (frame.toolCallId as string) || crypto.randomUUID();
-        const existing = project.activityLog.find((a) => a.id === toolCallId);
-        if (existing) {
-          existing.intent = (frame.intent as string) || existing.intent;
-          existing.args = frame.args ?? existing.args;
-        } else {
-          project.activityLog.push({
-            id: toolCallId,
-            type: 'tool_call',
-            tool: (frame.toolName as string) || 'tool',
-            intent: (frame.intent as string) || undefined,
-            args: frame.args,
-            time: new Date().toLocaleTimeString(),
-          });
-        }
+        const callId = (frame.toolCallId as string) || crypto.randomUUID();
+        const item =
+          project.activityLog.find((a) => a.callId === callId) ??
+          (() => {
+            project.activityLog.push({ id: crypto.randomUUID(), type: 'tool_call', callId, startedAt: Date.now() });
+            return project.activityLog[project.activityLog.length - 1];
+          })();
+        item.tool = (frame.toolName as string) || item.tool || 'tool';
+        item.intent = (frame.intent as string) || item.intent;
+        item.args = frame.args ?? item.args;
+        item.phase = 'running';
         break;
       }
 
       case 'tool_execution_end': {
-        const toolCallId = frame.toolCallId as string;
-        const existing = project.activityLog.find((a) => a.id === toolCallId);
-        if (existing) {
-          existing.isError = Boolean(frame.isError);
+        const item = project.activityLog.find((a) => a.callId === (frame.toolCallId as string));
+        if (item) {
+          item.isError = Boolean(frame.isError);
+          item.phase = 'done';
+          item.endedAt = Date.now();
         }
         break;
       }
@@ -448,7 +541,6 @@ class ProjectsStore {
     try {
       await invoke('omp_new_session', { id });
       project.lastPrompt = null;
-      project.thinking = '';
       project.activityLog = [];
       project.errorStderr = null;
       this.refreshState(id);
@@ -652,6 +744,15 @@ class ProjectsStore {
       const msg = typeof err === 'string' ? err : (err as Error)?.message || String(err);
       return msg;
     }
+  }
+
+  async gitInit(id: string): Promise<void> {
+    await invoke('git_init', { id });
+    await this.refreshGitStatus(id);
+  }
+
+  listDir(id: string, rel: string): Promise<{ name: string; is_dir: boolean }[]> {
+    return invoke('fs_list_dir', { id, rel });
   }
 
   private setGitError(id: string, err: unknown) {

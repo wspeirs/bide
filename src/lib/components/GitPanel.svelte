@@ -2,6 +2,8 @@
   import { projectsStore } from '../stores/projects.svelte';
   import type { ProjectState } from '../types';
   import StatusModal from './StatusModal.svelte';
+  import FileTree from './FileTree.svelte';
+  import { PaneGroup, Pane, PaneResizer } from 'paneforge';
   import {
     GitBranch,
     ArrowUp,
@@ -14,13 +16,17 @@
     FileText,
     AlertCircle,
     X,
+    Copy,
+    Check,
   } from 'lucide-svelte';
 
   interface Props {
     project: ProjectState;
+    /** Called with a project-relative path when a file in the browser is clicked. */
+    onPickFile: (relPath: string) => void;
   }
 
-  let { project }: Props = $props();
+  let { project, onPickFile }: Props = $props();
 
   let commitMessage = $state('');
   let isCommitting = $state(false);
@@ -31,6 +37,20 @@
   let statusModalText = $state('');
 
   let gitStatus = $derived(project.gitStatus);
+
+  let copied = $state(false);
+  let copyTimer: number | undefined = undefined;
+
+  async function copyPath() {
+    try {
+      await navigator.clipboard.writeText(project.dir);
+      copied = true;
+      clearTimeout(copyTimer);
+      copyTimer = window.setTimeout(() => (copied = false), 1500);
+    } catch (err) {
+      console.error('Failed to copy directory path:', err);
+    }
+  }
 
   function timeAgo(date: Date | null): string {
     if (!date) return 'never';
@@ -130,24 +150,47 @@
       gitActionError = typeof err === 'string' ? err : (err as Error)?.message || String(err);
     }
   }
+
+  async function handleInit() {
+    isActionRunning = true;
+    gitActionError = null;
+    try {
+      await projectsStore.gitInit(project.id);
+    } catch (err) {
+      gitActionError = typeof err === 'string' ? err : (err as Error)?.message || String(err);
+    } finally {
+      isActionRunning = false;
+    }
+  }
 </script>
 
 <div class="flex flex-col h-full w-full bg-[#1e1f22] select-none text-xs font-sans overflow-hidden border-l border-[#2b2d30]">
   <!-- Header: GIT, Branch, Ahead/Behind -->
-  <div class="flex items-center justify-between px-3 py-2 bg-[#252629] border-b border-[#2b2d30] shrink-0 font-medium">
-    <div class="flex items-center gap-2 overflow-hidden">
-      <GitBranch class="w-3.5 h-3.5 text-[#3574f0] shrink-0" />
-      <span class="font-bold tracking-wide uppercase text-[11px] text-[#dfe1e5]">Git</span>
-      {#if gitStatus}
-        <span class="text-[#6f737a]">·</span>
-        <span class="truncate text-[#bcbec4] font-mono text-[11px]" title={gitStatus.branch || ''}>
-          {gitStatus.detached ? 'detached' : gitStatus.branch || 'no branch'}
-        </span>
+  <div class="flex flex-col gap-1 px-3 py-2 bg-[#252629] border-b border-[#2b2d30] shrink-0 font-medium">
+    <!-- Project dir path (click copies path) -->
+    <button
+      type="button"
+      onclick={copyPath}
+      class="flex items-center gap-1.5 min-w-0 text-left group hover:text-white transition-colors cursor-pointer"
+      title="Click to copy full path"
+    >
+      <span class="truncate font-mono text-[#dfe1e5]">{project.dir}</span>
+      {#if copied}
+        <Check class="w-3 h-3 text-[#59a869] shrink-0" />
+      {:else}
+        <Copy class="w-3 h-3 text-[#6f737a] group-hover:text-[#bcbec4] shrink-0" />
       {/if}
-    </div>
+    </button>
+    <div class="flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 overflow-hidden">
+        <GitBranch class="w-3.5 h-3.5 text-[#3574f0] shrink-0" />
+        <span class="truncate text-[#bcbec4] font-mono text-[13px]" title={gitStatus?.branch || ''}>
+          {gitStatus ? (gitStatus.detached ? 'detached HEAD' : gitStatus.branch || 'no branch') : 'no repository'}
+        </span>
+      </div>
 
     {#if gitStatus}
-      <div class="flex items-center gap-2 text-[11px] font-mono shrink-0">
+      <div class="flex items-center gap-2 text-[13px] font-mono shrink-0">
         {#if gitStatus.ahead > 0}
           <span class="flex items-center text-[#59a869]" title={`${gitStatus.ahead} commits ahead`}>
             <ArrowUp class="w-3 h-3" />{gitStatus.ahead}
@@ -163,22 +206,39 @@
         {/if}
       </div>
     {/if}
+    </div>
   </div>
 
   {#if !gitStatus}
-    <!-- Not a git repo state -->
-    <div class="flex-1 flex flex-col items-center justify-center p-6 text-center text-[#6f737a] gap-2">
-      <GitBranch class="w-8 h-8 opacity-40 text-[#6f737a]" />
-      <div class="font-medium text-[#bcbec4]">Not a git repository</div>
-      <div class="text-[11px]">Run <code class="font-mono text-[#dfe1e5]">git init</code> in terminal to enable source control.</div>
+    <!-- Not a git repo: just the file tree, plus a button to initialise one -->
+    <div class="flex flex-col gap-2 px-3 py-2 border-b border-[#2b2d30] shrink-0">
+      <button
+        type="button"
+        onclick={handleInit}
+        disabled={isActionRunning}
+        title="Run git init . in the project directory"
+        class="flex items-center justify-center gap-1.5 py-1.5 px-3 rounded bg-[#3574f0] hover:bg-[#3574f0]/90 text-white font-medium text-xs disabled:opacity-50 transition-colors cursor-pointer"
+      >
+        <GitBranch class="w-3.5 h-3.5" />
+        <span>Initialize git repository</span>
+      </button>
+      {#if gitActionError}
+        <span class="font-mono text-[13px] text-[#e55765] break-words">{gitActionError}</span>
+      {/if}
+    </div>
+    <div class="flex-1 overflow-hidden">
+      <FileTree {project} onPick={onPickFile} />
     </div>
   {:else}
+    <PaneGroup direction="vertical" class="flex-1 w-full overflow-hidden">
+      <!-- Top: changes (modified / deleted / untracked), commit, remote actions -->
+      <Pane id="git-changes" order={1} defaultSize={60} minSize={20} class="flex flex-col overflow-hidden">
     <!-- Error banner if any -->
     {#if gitActionError}
       <div class="px-3 py-2 bg-[#e55765]/10 border-b border-[#e55765]/30 text-[#e55765] text-xs flex items-start justify-between gap-2 shrink-0">
         <div class="flex items-start gap-1.5 flex-1 break-words">
           <AlertCircle class="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <span class="font-mono text-[11px]">{gitActionError}</span>
+          <span class="font-mono text-[13px]">{gitActionError}</span>
         </div>
         <button
           type="button"
@@ -194,14 +254,14 @@
     <div class="flex-1 overflow-y-auto p-2 space-y-3 font-mono text-xs">
       <!-- Staged Files -->
       <div class="space-y-1">
-        <div class="flex items-center justify-between text-[11px] font-sans font-semibold uppercase tracking-wider text-[#6f737a] px-1">
+        <div class="flex items-center justify-between text-[13px] font-sans font-semibold uppercase tracking-wider text-[#6f737a] px-1">
           <span>Staged Changes ({gitStatus.staged.length})</span>
         </div>
         {#if gitStatus.staged.length === 0}
-          <div class="text-[11px] text-[#6f737a] italic px-1">No staged changes</div>
+          <div class="text-[13px] text-[#6f737a] italic px-1">No staged changes</div>
         {:else}
           {#each gitStatus.staged as f (f.path)}
-            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[13px]">
+            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[15px]">
               <div class="flex items-center gap-1.5 truncate flex-1 mr-2" title={f.orig_path ? `${f.orig_path} -> ${f.path}` : f.path}>
                 <span class="w-3 text-center font-bold {f.status === 'D' ? 'text-[#e55765]' : f.status === 'A' ? 'text-[#59a869]' : 'text-[#3574f0]'}">
                   {f.status}
@@ -223,24 +283,24 @@
 
       <!-- Unstaged Files -->
       <div class="space-y-1">
-        <div class="flex items-center justify-between text-[11px] font-sans font-semibold uppercase tracking-wider text-[#6f737a] px-1">
+        <div class="flex items-center justify-between text-[13px] font-sans font-semibold uppercase tracking-wider text-[#6f737a] px-1">
           <span>Changes ({gitStatus.unstaged.length})</span>
           {#if gitStatus.unstaged.length > 0}
             <button
               type="button"
               onclick={handleAddAll}
               title="Add all tracked changes (git add -u)"
-              class="text-[10px] text-[#3574f0] hover:underline normal-case font-normal cursor-pointer"
+              class="text-[12px] text-[#3574f0] hover:underline normal-case font-normal cursor-pointer"
             >
               Add all
             </button>
           {/if}
         </div>
         {#if gitStatus.unstaged.length === 0}
-          <div class="text-[11px] text-[#6f737a] italic px-1">No unstaged changes</div>
+          <div class="text-[13px] text-[#6f737a] italic px-1">No unstaged changes</div>
         {:else}
           {#each gitStatus.unstaged as f (f.path)}
-            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[13px]">
+            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[15px]">
               <div class="flex items-center gap-1.5 truncate flex-1 mr-2" title={f.path}>
                 <span class="w-3 text-center font-bold {f.status === 'D' ? 'text-[#e55765]' : 'text-[#e2a53b]'}">
                   {f.status}
@@ -262,14 +322,14 @@
 
       <!-- Untracked Files -->
       <div class="space-y-1">
-        <div class="flex items-center justify-between text-[11px] font-sans font-semibold uppercase tracking-wider text-[#6f737a] px-1">
+        <div class="flex items-center justify-between text-[13px] font-sans font-semibold uppercase tracking-wider text-[#6f737a] px-1">
           <span>Untracked ({gitStatus.untracked.length})</span>
         </div>
         {#if gitStatus.untracked.length === 0}
-          <div class="text-[11px] text-[#6f737a] italic px-1">No untracked files</div>
+          <div class="text-[13px] text-[#6f737a] italic px-1">No untracked files</div>
         {:else}
           {#each gitStatus.untracked as p (p)}
-            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[13px]">
+            <div class="flex items-center justify-between px-1.5 py-1 rounded hover:bg-[#252629] group transition-colors font-mono text-[15px]">
               <div class="flex items-center gap-1.5 truncate flex-1 mr-2" title={p}>
                 <span class="w-3 text-center font-bold text-[#6f737a]">?</span>
                 <span class="truncate text-[#dfe1e5]">{p}</span>
@@ -314,7 +374,7 @@
           type="button"
           onclick={handleShowStatus}
           title="View raw git status output"
-          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[11px] cursor-pointer"
+          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[13px] cursor-pointer"
         >
           <FileText class="w-3 h-3" />
           <span>Status</span>
@@ -325,7 +385,7 @@
           onclick={handlePull}
           disabled={isActionRunning}
           title="Pull from remote (git pull)"
-          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[11px] cursor-pointer disabled:opacity-50"
+          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[13px] cursor-pointer disabled:opacity-50"
         >
           <Download class="w-3 h-3" />
           <span>Pull</span>
@@ -336,7 +396,7 @@
           onclick={handlePush}
           disabled={isActionRunning}
           title="Push to remote (git push)"
-          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[11px] cursor-pointer disabled:opacity-50"
+          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[13px] cursor-pointer disabled:opacity-50"
         >
           <Upload class="w-3 h-3" />
           <span>Push</span>
@@ -347,7 +407,7 @@
           onclick={handleFetch}
           disabled={isActionRunning}
           title="Fetch from remote (git fetch --prune)"
-          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[11px] cursor-pointer disabled:opacity-50"
+          class="flex items-center justify-center gap-1 py-1 px-1.5 rounded bg-[#252629] border border-[#393b40] text-[#bcbec4] hover:text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-[13px] cursor-pointer disabled:opacity-50"
         >
           <RefreshCw class="w-3 h-3 {isActionRunning ? 'animate-spin' : ''}" />
           <span>Fetch</span>
@@ -355,10 +415,19 @@
       </div>
 
       <!-- Footer: fetched status -->
-      <div class="text-[11px] text-[#6f737a] text-center font-mono">
+      <div class="text-[13px] text-[#6f737a] text-center font-mono">
         fetched {fetchedAgo}
       </div>
     </div>
+      </Pane>
+
+      <PaneResizer class="h-1 bg-[#2b2d30] hover:bg-[#3574f0] transition-colors cursor-row-resize shrink-0" />
+
+      <!-- Bottom: file browser -->
+      <Pane id="git-files" order={2} defaultSize={40} minSize={15} class="overflow-hidden">
+        <FileTree {project} onPick={onPickFile} />
+      </Pane>
+    </PaneGroup>
   {/if}
 </div>
 

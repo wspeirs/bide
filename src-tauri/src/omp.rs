@@ -436,6 +436,15 @@ impl OmpSession {
         Ok(session)
     }
 
+    /// Mirror an outbound frame to the UI so the debug pane can show both directions.
+    fn emit_out(&self, frame: Value) {
+        let wrapped = serde_json::json!({ "type": "rpc_out", "frame": frame });
+        self.tauri_channels
+            .lock()
+            .unwrap()
+            .retain(|ch| ch.send(wrapped.clone()).is_ok());
+    }
+
     fn update_state_cache(&self, state: &Value) {
         let data = state.get("data").unwrap_or(state);
         if let Some(sf) = data.get("sessionFile").and_then(|v| v.as_str()) {
@@ -476,6 +485,7 @@ impl OmpSession {
                 return Err(format!("Serialization error: {e}"));
             }
         };
+        self.emit_out(Value::Object(command));
 
         let send_res = {
             let tx_guard = self.stdin_tx.lock().await;
@@ -548,6 +558,7 @@ impl OmpSession {
         let line = serde_json::to_string(&response)
             .map_err(|e| format!("Serialization error: {e}"))?
             + "\n";
+        self.emit_out(response);
         let tx_guard = self.stdin_tx.lock().await;
         if let Some(tx) = tx_guard.as_ref() {
             tx.send(line)

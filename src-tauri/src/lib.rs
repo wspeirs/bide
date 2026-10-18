@@ -95,6 +95,8 @@ pub fn run() {
             commands::git_push,
             commands::git_pull,
             commands::git_fetch,
+            commands::git_init,
+            commands::fs_list_dir,
             commands::git_status_text,
             commands::app_update,
         ])

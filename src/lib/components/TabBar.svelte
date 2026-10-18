@@ -16,7 +16,7 @@
   }
 </script>
 
-<div class="flex h-9 w-full items-stretch bg-[#2b2d30] border-b border-[#2b2d30] select-none text-[13px] font-sans overflow-x-auto overflow-y-hidden">
+<div class="flex h-9 w-full items-stretch bg-[#2b2d30] border-b border-[#2b2d30] select-none text-[15px] font-sans overflow-x-auto overflow-y-hidden">
   <div class="flex items-stretch flex-1 min-w-0">
     {#each projectsStore.projects as project (project.id)}
       {@const isActive = project.id === projectsStore.activeProjectId}
