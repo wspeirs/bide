@@ -3,11 +3,12 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::{
-    git::{self, GitStatus},
+    git::{self, Branches, GitStatus, Worktree},
     persist,
     projects::{ProjectInfo, ProjectsState},
     roles::{self, RoleInfo},
     update::{self, UpdateReport},
+    workspace::{self, WorkspaceConfig},
 };
 
 #[tauri::command]
@@ -267,4 +268,123 @@ pub async fn git_status_text(
 #[tauri::command]
 pub async fn app_update(state: State<'_, ProjectsState>) -> Result<UpdateReport, String> {
     Ok(update::app_update(&state).await)
+}
+
+#[tauri::command]
+pub async fn workspace_config_get(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<WorkspaceConfig, String> {
+    let p = state.get_project(&id).await?;
+    let store_dir = workspace::store_dir();
+    let warning = workspace::sync(&p.dir, &store_dir).await?;
+    if let Some(w) = warning {
+        Ok(WorkspaceConfig {
+            text: String::new(),
+            source: "none",
+            warning: Some(w),
+        })
+    } else {
+        let (key, _) = workspace::repo_key(&p.dir).await;
+        let path = workspace::store_path(&store_dir, &key);
+        if path.exists() {
+            let text = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| format!("Failed to read workspace config: {e}"))?;
+            Ok(WorkspaceConfig {
+                text,
+                source: "workspace",
+                warning: None,
+            })
+        } else if let Some(t) = workspace::read_global().await {
+            Ok(WorkspaceConfig {
+                text: t,
+                source: "global",
+                warning: None,
+            })
+        } else {
+            Ok(WorkspaceConfig {
+                text: String::new(),
+                source: "none",
+                warning: None,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn workspace_config_set(
+    state: State<'_, ProjectsState>,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    let (key, is_git) = workspace::repo_key(&p.dir).await;
+    if is_git && git::is_tracked(&p.dir, workspace::REL).await {
+        return Err(workspace::TRACKED_WARNING.to_string());
+    }
+    let text = workspace::normalize(&text)?;
+    let store_dir = workspace::store_dir();
+    tokio::fs::create_dir_all(&store_dir)
+        .await
+        .map_err(|e| format!("Failed to create store directory: {e}"))?;
+    let s_path = workspace::store_path(&store_dir, &key);
+    tokio::fs::write(&s_path, text)
+        .await
+        .map_err(|e| format!("Failed to write store config: {e}"))?;
+
+    let projects: Vec<_> = state.projects.lock().await.values().cloned().collect();
+    for q in projects {
+        let (q_key, _) = workspace::repo_key(&q.dir).await;
+        if q_key == key {
+            if let Err(e) = workspace::sync(&q.dir, &store_dir).await {
+                eprintln!("Failed to sync workspace config for tab {}: {e}", q.id);
+            }
+            let _ = state.restart_when_settled(q).await;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn git_worktree_list(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<Vec<Worktree>, String> {
+    let p = state.get_project(&id).await?;
+    git::git_worktree_list(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_branches(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<Branches, String> {
+    let p = state.get_project(&id).await?;
+    git::git_branches(&p.dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_worktree_add(
+    state: State<'_, ProjectsState>,
+    id: String,
+    branch: String,
+    new_branch: bool,
+    base: Option<String>,
+) -> Result<String, String> {
+    let p = state.get_project(&id).await?;
+    git::git_worktree_add(&p.dir, &branch, new_branch, base.as_deref())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn git_worktree_remove(
+    state: State<'_, ProjectsState>,
+    id: String,
+    path: String,
+    force: bool,
+) -> Result<(), String> {
+    let p = state.get_project(&id).await?;
+    git::git_worktree_remove(&p.dir, &path, force).await.map_err(|e| e.to_string())
 }

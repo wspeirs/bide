@@ -1,7 +1,7 @@
 //! Thin wrappers over the `git` CLI plus a `status --porcelain=v2 --branch -z` parser.
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tokio::process::Command;
@@ -45,6 +45,26 @@ impl fmt::Display for GitError {
 }
 
 impl std::error::Error for GitError {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    pub path: String,           // canonicalized when it exists, raw otherwise
+    pub head: String,           // "" for bare
+    pub branch: Option<String>, // "refs/heads/" stripped; None if detached/bare
+    pub detached: bool,
+    pub bare: bool,
+    pub locked: bool,
+    pub prunable: bool,
+    pub is_main: bool,          // first entry of the list
+    pub is_current: bool,       // canonical(path) == canonical(dir)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Branches {
+    pub local: Vec<String>,
+    pub remote: Vec<String>,
+}
 
 /// Parse the stdout of `git status --porcelain=v2 --branch -z`.
 pub fn parse_status(out: &str) -> GitStatus {
@@ -166,6 +186,259 @@ pub async fn git_init(dir: &Path) -> Result<(), GitError> {
 }
 pub async fn git_status_text(dir: &Path) -> Result<String, GitError> {
     run(dir, &["status"]).await
+}
+
+/// Absolute, canonical `--git-common-dir` (same for every worktree of a repo).
+pub async fn common_dir(dir: &Path) -> Result<PathBuf, GitError> {
+    let out = run(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await?;
+    let trimmed = out.trim();
+    let p = PathBuf::from(trimmed);
+    Ok(std::fs::canonicalize(&p).unwrap_or(p))
+}
+
+pub async fn is_tracked(dir: &Path, rel: &str) -> bool {
+    run(dir, &["ls-files", "--error-unmatch", "--", rel])
+        .await
+        .is_ok()
+}
+
+pub async fn ensure_excluded(dir: &Path, rel: &str) -> Result<(), GitError> {
+    if run(dir, &["check-ignore", "-q", "--", rel]).await.is_ok() {
+        return Ok(());
+    }
+    let out = run(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+    )
+    .await?;
+    let exclude_path = PathBuf::from(out.trim());
+    if let Some(parent) = exclude_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| GitError::Failed(e.to_string()))?;
+        }
+    }
+    let mut content = match std::fs::read_to_string(&exclude_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(GitError::Failed(e.to_string())),
+    };
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    // Anchor relative to the repo root: `dir` may be a subdirectory of the repo.
+    let prefix = run(dir, &["rev-parse", "--show-prefix"]).await?;
+    content.push_str(&format!("/{}{rel}\n", prefix.trim()));
+    std::fs::write(&exclude_path, content)
+        .map_err(|e| GitError::Failed(e.to_string()))?;
+    Ok(())
+}
+
+/// Pure parser for the stdout of `git worktree list --porcelain`.
+pub fn parse_worktrees(out: &str) -> Vec<Worktree> {
+    let mut worktrees = Vec::new();
+    let mut cur: Option<Worktree> = None;
+
+    for line in out.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if let Some(mut wt) = cur.take() {
+                if wt.bare {
+                    wt.head.clear();
+                    wt.branch = None;
+                }
+                if wt.detached {
+                    wt.branch = None;
+                }
+                worktrees.push(wt);
+            }
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(mut wt) = cur.take() {
+                if wt.bare {
+                    wt.head.clear();
+                    wt.branch = None;
+                }
+                if wt.detached {
+                    wt.branch = None;
+                }
+                worktrees.push(wt);
+            }
+            let mut wt = Worktree::default();
+            wt.path = path.to_string();
+            cur = Some(wt);
+        } else if let Some(wt) = &mut cur {
+            if let Some(sha) = line.strip_prefix("HEAD ") {
+                wt.head = sha.trim().to_string();
+            } else if let Some(branch_ref) = line.strip_prefix("branch ") {
+                let r = branch_ref.trim();
+                let stripped = r.strip_prefix("refs/heads/").unwrap_or(r);
+                wt.branch = Some(stripped.to_string());
+            } else if line == "detached" {
+                wt.detached = true;
+            } else if line == "bare" {
+                wt.bare = true;
+            } else if line == "locked" || line.starts_with("locked ") {
+                wt.locked = true;
+            } else if line == "prunable" || line.starts_with("prunable ") {
+                wt.prunable = true;
+            }
+        }
+    }
+
+    if let Some(mut wt) = cur.take() {
+        if wt.bare {
+            wt.head.clear();
+            wt.branch = None;
+        }
+        if wt.detached {
+            wt.branch = None;
+        }
+        worktrees.push(wt);
+    }
+
+    if let Some(first) = worktrees.first_mut() {
+        first.is_main = true;
+    }
+
+    worktrees
+}
+
+pub async fn git_worktree_list(dir: &Path) -> Result<Vec<Worktree>, GitError> {
+    let out = run(dir, &["worktree", "list", "--porcelain"]).await?;
+    let mut entries = parse_worktrees(&out);
+    let cur_dir = std::fs::canonicalize(dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| dir.to_string_lossy().into_owned());
+
+    for entry in &mut entries {
+        let p = std::fs::canonicalize(&entry.path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| entry.path.clone());
+        entry.path = p;
+        entry.is_current = entry.path == cur_dir;
+    }
+
+    Ok(entries)
+}
+
+pub async fn git_worktree_add(
+    dir: &Path,
+    branch: &str,
+    new_branch: bool,
+    base: Option<&str>,
+) -> Result<String, GitError> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err(GitError::Failed("Branch name is required".to_string()));
+    }
+    if branch.starts_with('-') || base.map_or(false, |b| b.trim().starts_with('-')) {
+        return Err(GitError::Failed("Branch names cannot start with '-'".to_string()));
+    }
+
+    let worktrees = git_worktree_list(dir).await?;
+    let m = worktrees
+        .first()
+        .ok_or_else(|| GitError::Failed("No main worktree found".to_string()))?;
+    let m_path = Path::new(&m.path);
+    let parent = m_path
+        .parent()
+        .ok_or_else(|| GitError::Failed("Main worktree has no parent directory".to_string()))?;
+    let main_name = m_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| GitError::Failed("Invalid main worktree directory name".to_string()))?;
+
+    let sanitized: String = branch
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        return Err(GitError::Failed("Invalid branch name".to_string()));
+    }
+
+    let wt_dir = parent.join(format!("{main_name}.worktrees"));
+    std::fs::create_dir_all(&wt_dir)
+        .map_err(|e| GitError::Failed(format!("Failed to create worktrees dir: {e}")))?;
+    let target_path = wt_dir.join(&sanitized);
+    let target_str = target_path.to_string_lossy().into_owned();
+
+    let mut args: Vec<&str> = Vec::new();
+    if new_branch {
+        args.extend_from_slice(&["worktree", "add", "-b", branch, &target_str]);
+        if let Some(b) = base {
+            let b_trimmed = b.trim();
+            if !b_trimmed.is_empty() {
+                args.push(b_trimmed);
+            }
+        }
+    } else {
+        args.extend_from_slice(&["worktree", "add", &target_str, branch]);
+    }
+
+    run(dir, &args).await?;
+    std::fs::canonicalize(&target_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| GitError::Failed(e.to_string()))
+}
+
+pub async fn git_worktree_remove(dir: &Path, path: &str, force: bool) -> Result<(), GitError> {
+    let worktrees = git_worktree_list(dir).await?;
+    let canonical_path = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string());
+
+    let entry = worktrees
+        .iter()
+        .find(|e| e.path == canonical_path)
+        .ok_or_else(|| GitError::Failed("Not a worktree of this repository".to_string()))?;
+
+    if entry.is_main {
+        return Err(GitError::Failed("Cannot remove the main worktree".to_string()));
+    }
+    if entry.is_current {
+        return Err(GitError::Failed("Cannot remove the worktree this tab is using".to_string()));
+    }
+
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(&entry.path);
+
+    run(dir, &args).await.map(drop)
+}
+
+pub async fn git_branches(dir: &Path) -> Result<Branches, GitError> {
+    let out = run(
+        dir,
+        &["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"],
+    )
+    .await?;
+    let mut branches = Branches::default();
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            branches.local.push(name.to_string());
+        } else if let Some(rem) = line.strip_prefix("refs/remotes/") {
+            if !rem.ends_with("/HEAD") {
+                branches.remote.push(rem.to_string());
+            }
+        }
+    }
+    Ok(branches)
 }
 
 #[cfg(test)]
@@ -384,5 +657,176 @@ mod tests {
             .contains("Untracked files"));
         // no upstream: push fails with stderr, doesn't hang
         assert!(matches!(git_push(d).await, Err(GitError::Failed(_))));
+    }
+
+    #[test]
+    fn parse_worktrees_porcelain() {
+        let fixture = "\
+worktree /path/to/bare
+bare
+
+worktree /path/to/main
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /path/to/detached
+HEAD 2222222222222222222222222222222222222222
+detached
+
+worktree /path/to/locked
+HEAD 3333333333333333333333333333333333333333
+branch refs/heads/feature-locked
+locked reason for lock
+
+worktree /path/to/prunable
+HEAD 4444444444444444444444444444444444444444
+branch refs/heads/feature-prunable
+prunable gitdir file points to non-existent location
+";
+        let wts = parse_worktrees(fixture);
+        assert_eq!(wts.len(), 5);
+
+        assert_eq!(wts[0].path, "/path/to/bare");
+        assert!(wts[0].bare);
+        assert_eq!(wts[0].head, "");
+        assert_eq!(wts[0].branch, None);
+        assert!(wts[0].is_main);
+        assert!(!wts[0].is_current);
+
+        assert_eq!(wts[1].path, "/path/to/main");
+        assert_eq!(wts[1].head, "1111111111111111111111111111111111111111");
+        assert_eq!(wts[1].branch.as_deref(), Some("main"));
+        assert!(!wts[1].bare);
+        assert!(!wts[1].detached);
+        assert!(!wts[1].is_main);
+        assert!(!wts[1].is_current);
+
+        assert_eq!(wts[2].path, "/path/to/detached");
+        assert_eq!(wts[2].head, "2222222222222222222222222222222222222222");
+        assert!(wts[2].detached);
+        assert_eq!(wts[2].branch, None);
+        assert!(!wts[2].is_main);
+
+        assert_eq!(wts[3].path, "/path/to/locked");
+        assert!(wts[3].locked);
+        assert_eq!(wts[3].branch.as_deref(), Some("feature-locked"));
+        assert!(!wts[3].is_main);
+
+        assert_eq!(wts[4].path, "/path/to/prunable");
+        assert!(wts[4].prunable);
+        assert_eq!(wts[4].branch.as_deref(), Some("feature-prunable"));
+        assert!(!wts[4].is_main);
+    }
+
+    #[tokio::test]
+    async fn exclude_and_worktree_lifecycle() {
+        let t = Tmp::new("wt-lifecycle");
+        let d = &t.0;
+        run(d, &["init", "-q", "-b", "main"]).await.unwrap();
+        run(d, &["config", "user.email", "a@b"]).await.unwrap();
+        run(d, &["config", "user.name", "n"]).await.unwrap();
+        std::fs::write(d.join("a"), "1").unwrap();
+        git_stage(d, "a").await.unwrap();
+        git_commit(d, "init").await.unwrap();
+
+        assert!(is_tracked(d, "a").await);
+        assert!(!is_tracked(d, "b").await);
+
+        let common = common_dir(d).await.unwrap();
+        assert!(common.ends_with(".git"));
+
+        // ensure_excluded twice -> contains /.omp/config.yml exactly once
+        ensure_excluded(d, ".omp/config.yml").await.unwrap();
+        ensure_excluded(d, ".omp/config.yml").await.unwrap();
+        let excl_path = run(
+            d,
+            &["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        )
+        .await
+        .unwrap();
+        let content = std::fs::read_to_string(excl_path.trim()).unwrap();
+        assert_eq!(content.matches("/.omp/config.yml").count(), 1);
+
+        // repo with committed .gitignore having .omp/config.yml
+        let t2 = Tmp::new("wt-lifecycle-2");
+        let d2 = &t2.0;
+        run(d2, &["init", "-q", "-b", "main"]).await.unwrap();
+        run(d2, &["config", "user.email", "a@b"]).await.unwrap();
+        run(d2, &["config", "user.name", "n"]).await.unwrap();
+        std::fs::write(d2.join(".gitignore"), "/.omp/config.yml\n").unwrap();
+        git_stage(d2, ".gitignore").await.unwrap();
+        git_commit(d2, "ignore").await.unwrap();
+        ensure_excluded(d2, ".omp/config.yml").await.unwrap();
+        let excl_path2 = run(
+            d2,
+            &["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        )
+        .await
+        .unwrap();
+        let p2 = PathBuf::from(excl_path2.trim());
+        if p2.exists() {
+            let content2 = std::fs::read_to_string(p2).unwrap();
+            assert!(!content2.contains("/.omp/config.yml"));
+        }
+
+        // worktree add, list, remove
+        let added_path = git_worktree_add(d, "feat/x", true, None).await.unwrap();
+        assert!(added_path.ends_with("feat-x"));
+
+        let list = git_worktree_list(d).await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list[0].is_main);
+        assert!(list[0].is_current);
+        assert!(!list[1].is_main);
+        assert!(!list[1].is_current);
+        assert_eq!(list[1].branch.as_deref(), Some("feat/x"));
+
+        // git_worktree_list(<new path>) -> is_current on the linked one
+        let list_from_new = git_worktree_list(Path::new(&added_path)).await.unwrap();
+        assert_eq!(list_from_new.len(), 2);
+        assert!(!list_from_new[0].is_current);
+        assert!(list_from_new[1].is_current);
+
+        let branches = git_branches(d).await.unwrap();
+        assert!(branches.local.contains(&"main".to_string()));
+        assert!(branches.local.contains(&"feat/x".to_string()));
+
+        // git_worktree_remove(d, d_path, false) -> Err (main)
+        let main_remove_res = git_worktree_remove(d, &d.to_string_lossy(), false).await;
+        assert!(main_remove_res.is_err());
+
+        // write <new>/.omp/config.yml, then remove without force -> Ok and dir gone
+        let new_wt_path = PathBuf::from(&added_path);
+        std::fs::create_dir_all(new_wt_path.join(".omp")).unwrap();
+        std::fs::write(new_wt_path.join(".omp").join("config.yml"), "test: 1").unwrap();
+
+        git_worktree_remove(d, &added_path, false).await.unwrap();
+        assert!(!new_wt_path.exists());
+
+        let list_after = git_worktree_list(d).await.unwrap();
+        assert_eq!(list_after.len(), 1);
+
+        // Clean up .worktrees directory
+        if let Some(parent) = new_wt_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+}
+
+    #[tokio::test]
+    async fn ensure_excluded_in_subdirectory() {
+        let t = Tmp::new("excl-subdir");
+        let d = &t.0;
+        run(d, &["init", "-q", "-b", "main"]).await.unwrap();
+        let sub = d.join("sub");
+        std::fs::create_dir_all(sub.join(".omp")).unwrap();
+        std::fs::write(sub.join(".omp/config.yml"), "a: 1\n").unwrap();
+
+        ensure_excluded(&sub, ".omp/config.yml").await.unwrap();
+        ensure_excluded(&sub, ".omp/config.yml").await.unwrap();
+
+        let status = git_status(d).await.unwrap();
+        assert!(status.untracked.is_empty(), "{:?}", status.untracked);
+        let excl = std::fs::read_to_string(d.join(".git/info/exclude")).unwrap();
+        assert_eq!(excl.matches("/sub/.omp/config.yml").count(), 1);
     }
 }

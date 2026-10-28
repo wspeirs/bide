@@ -5,6 +5,7 @@ pub mod persist;
 pub mod projects;
 pub mod roles;
 pub mod update;
+pub mod workspace;
 use tauri::{
     menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
     Emitter,
@@ -99,6 +100,12 @@ pub fn run() {
             commands::fs_list_dir,
             commands::git_status_text,
             commands::app_update,
+            commands::workspace_config_get,
+            commands::workspace_config_set,
+            commands::git_worktree_list,
+            commands::git_branches,
+            commands::git_worktree_add,
+            commands::git_worktree_remove,
         ])
         .setup(move |app| {
             tauri::async_runtime::spawn(projects_state_fetch.hourly_fetch());

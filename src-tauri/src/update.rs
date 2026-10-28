@@ -1,4 +1,4 @@
-use std::{process::Stdio, sync::atomic::Ordering, time::Duration};
+use std::{process::Stdio, time::Duration};
 
 use serde::Serialize;
 use tokio::process::Command;
@@ -64,25 +64,11 @@ pub async fn app_update(state: &ProjectsState) -> UpdateReport {
 
     let projects: Vec<_> = state.projects.lock().await.values().cloned().collect();
     for p in projects {
-        if p.session.is_settled() {
-            if state.restart(&p.id).await.is_ok() {
-                report.restarts_triggered.push(p.id.clone());
-            }
-        } else {
-            p.restart_pending.store(true, Ordering::SeqCst);
-            report.restarts_pending.push(p.id.clone());
-            let state = state.clone();
-            let mut rx = p.session.subscribe_broadcast();
-            tokio::spawn(async move {
-                while let Ok(frame) = rx.recv().await {
-                    if frame.get("type").and_then(|v| v.as_str()) == Some("session_settled") {
-                        if p.restart_pending.swap(false, Ordering::SeqCst) {
-                            let _ = state.restart(&p.id).await;
-                        }
-                        break;
-                    }
-                }
-            });
+        let id = p.id.clone();
+        match state.restart_when_settled(p).await {
+            Ok(true) => report.restarts_triggered.push(id),
+            Ok(false) => report.restarts_pending.push(id),
+            Err(_) => {}
         }
     }
     report

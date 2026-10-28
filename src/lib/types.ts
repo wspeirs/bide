@@ -102,3 +102,26 @@ export interface ProjectState {
   debugLog: DebugEntry[];
   debugOpen: boolean;
 }
+
+export interface Worktree {
+  path: string;
+  head: string;
+  branch: string | null;
+  detached: boolean;
+  bare: boolean;
+  locked: boolean;
+  prunable: boolean;
+  isMain: boolean;
+  isCurrent: boolean;
+}
+
+export interface Branches {
+  local: string[];
+  remote: string[];
+}
+
+export interface WorkspaceConfig {
+  text: string;
+  source: 'workspace' | 'global' | 'none';
+  warning: string | null;
+}

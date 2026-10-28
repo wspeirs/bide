@@ -216,12 +216,14 @@ async fn test_projects_state_lifecycle() {
 
     let temp_dir = tempfile::tempdir().expect("failed to create tempdir");
     let dir_str = temp_dir.path().to_str().expect("valid dir string");
+    let canonical_dir = std::fs::canonicalize(temp_dir.path()).expect("canonical temp dir");
+    let canonical_dir_str = canonical_dir.to_string_lossy().into_owned();
 
     let state = ProjectsState::new();
 
     // 1. Open project
     let info = state.open(dir_str).await.expect("open project failed");
-    assert_eq!(info.dir, dir_str);
+    assert_eq!(info.dir, canonical_dir_str);
     assert!(!info.id.is_empty());
     assert!(info.session_file.is_some());
 
@@ -231,8 +233,7 @@ async fn test_projects_state_lifecycle() {
         .await
         .expect("get_project failed");
     assert_eq!(project.id, info.id);
-    assert_eq!(project.dir, temp_dir.path());
-
+    assert_eq!(project.dir, canonical_dir);
     // Verify session state from project.session
     let session_state = project
         .session

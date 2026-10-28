@@ -8,6 +8,9 @@ import type {
   RoleInfo,
   ActivityItem,
   UiRequest,
+  Worktree,
+  Branches,
+  WorkspaceConfig,
 } from '../types';
 
 function getBasename(dir: string): string {
@@ -749,6 +752,35 @@ class ProjectsStore {
   async gitInit(id: string): Promise<void> {
     await invoke('git_init', { id });
     await this.refreshGitStatus(id);
+  }
+
+  async listWorktrees(id: string): Promise<Worktree[]> {
+    return await invoke<Worktree[]>('git_worktree_list', { id });
+  }
+
+  async listBranches(id: string): Promise<Branches> {
+    return await invoke<Branches>('git_branches', { id });
+  }
+
+  async addWorktree(
+    id: string,
+    branch: string,
+    newBranch: boolean,
+    base: string | null,
+  ): Promise<string> {
+    return await invoke<string>('git_worktree_add', { id, branch, newBranch, base });
+  }
+
+  async removeWorktree(id: string, path: string, force: boolean): Promise<void> {
+    await invoke('git_worktree_remove', { id, path, force });
+  }
+
+  async getWorkspaceConfig(id: string): Promise<WorkspaceConfig> {
+    return await invoke<WorkspaceConfig>('workspace_config_get', { id });
+  }
+
+  async setWorkspaceConfig(id: string, text: string): Promise<void> {
+    await invoke('workspace_config_set', { id, text });
   }
 
   listDir(id: string, rel: string): Promise<{ name: string; is_dir: boolean }[]> {

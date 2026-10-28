@@ -68,14 +68,19 @@ impl ProjectsState {
     }
 
     pub async fn open(&self, dir: &str) -> Result<ProjectInfo, String> {
-        let dir_path = PathBuf::from(dir);
+        let dir_path = std::fs::canonicalize(dir).map_err(|e| format!("Cannot open '{dir}': {e}"))?;
+        match crate::workspace::sync(&dir_path, &crate::workspace::store_dir()).await {
+            Ok(Some(warning)) => eprintln!("workspace sync warning: {warning}"),
+            Err(e) => eprintln!("workspace sync error: {e}"),
+            Ok(None) => {}
+        }
         let session = OmpSession::spawn(&dir_path, None).await?;
         let session_file = session.session_file();
         let id = uuid::Uuid::new_v4().to_string();
 
         let project = Arc::new(Project {
             id: id.clone(),
-            dir: dir_path,
+            dir: dir_path.clone(),
             session,
             session_file: session_file.clone(),
             orchestrate: false,
@@ -93,7 +98,7 @@ impl ProjectsState {
         let mut config = persist::load();
         config.tabs.push(TabConfig {
             id: id.clone(),
-            dir: dir.to_string(),
+            dir: dir_path.to_string_lossy().into_owned(),
             session_file,
             orchestrate: false,
             role: "default".to_string(),
@@ -140,6 +145,13 @@ impl ProjectsState {
                 continue;
             }
             let dir_path = PathBuf::from(&tab.dir);
+            if dir_path.is_dir() {
+                match crate::workspace::sync(&dir_path, &crate::workspace::store_dir()).await {
+                    Ok(Some(warning)) => eprintln!("workspace sync warning: {warning}"),
+                    Err(e) => eprintln!("workspace sync error: {e}"),
+                    Ok(None) => {}
+                }
+            }
             let resume_path = tab
                 .session_file
                 .as_ref()
@@ -261,6 +273,29 @@ impl ProjectsState {
         }
 
         Ok(ProjectInfo::from(&*updated_project))
+    }
+
+    /// Restart now if settled (Ok(true)); otherwise mark restart_pending and restart on the
+    /// next `session_settled` frame (Ok(false)). Err = immediate restart failed.
+    pub async fn restart_when_settled(&self, p: Arc<Project>) -> Result<bool, String> {
+        if p.session.is_settled() {
+            self.restart(&p.id).await.map(|_| true)
+        } else {
+            p.restart_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+            let state = self.clone();
+            let mut rx = p.session.subscribe_broadcast();
+            tokio::spawn(async move {
+                while let Ok(frame) = rx.recv().await {
+                    if frame.get("type").and_then(|v| v.as_str()) == Some("session_settled") {
+                        if p.restart_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            let _ = state.restart(&p.id).await;
+                        }
+                        break;
+                    }
+                }
+            });
+            Ok(false)
+        }
     }
 
     pub async fn get_project(&self, id: &str) -> Result<Arc<Project>, String> {
