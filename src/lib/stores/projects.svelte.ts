@@ -8,6 +8,7 @@ import type {
   RoleInfo,
   ActivityItem,
   UiRequest,
+  AskQuestion,
   Worktree,
   Branches,
   WorkspaceConfig,
@@ -440,14 +441,19 @@ class ProjectsStore {
 
       case 'extension_ui_request': {
         const method = (frame.method as string) || '';
-        const noiseMethods = ['setStatus', 'setWidget', 'notify'];
-        if (!noiseMethods.includes(method)) {
+        if (method === 'cancel') {
+          // omp timed out / aborted the dialog; close it
+          if (project.pendingUiRequest?.id === frame.targetId) project.pendingUiRequest = null;
+          break;
+        }
+        if (['select', 'confirm', 'input', 'editor', 'ask'].includes(method)) {
           project.pendingUiRequest = {
             id: (frame.id as string) || crypto.randomUUID(),
-            method: method || 'select',
+            method,
             title: (frame.title as string) || undefined,
             message: (frame.message as string) || undefined,
             options: Array.isArray(frame.options) ? (frame.options as string[]) : undefined,
+            questions: Array.isArray(frame.questions) ? (frame.questions as AskQuestion[]) : undefined,
             defaultValue: (frame.defaultValue as string) || undefined,
           };
         }
@@ -609,9 +615,10 @@ class ProjectsStore {
 
   async respondUi(id: string, response: Record<string, unknown>): Promise<void> {
     const project = this.projects.find((p) => p.id === id);
-    if (project) {
-      project.pendingUiRequest = null;
-    }
+    const reqId = project?.pendingUiRequest?.id;
+    if (!project || !reqId) return;
+    project.pendingUiRequest = null;
+    response = { type: 'extension_ui_response', id: reqId, ...response };
 
     try {
       await invoke('omp_ui_respond', { id, response });

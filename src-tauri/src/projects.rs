@@ -137,20 +137,23 @@ impl ProjectsState {
     pub async fn restore(&self) -> Result<Vec<ProjectInfo>, String> {
         let mut config = persist::load();
         let mut restored = Vec::new();
+        let mut kept_tabs = Vec::with_capacity(config.tabs.len());
 
-        for tab in &mut config.tabs {
+        for mut tab in config.tabs {
             // Already running (e.g. frontend reloaded): reuse the live session.
             if let Some(p) = self.projects.lock().await.get(&tab.id) {
                 restored.push(ProjectInfo::from(&**p));
+                kept_tabs.push(tab);
                 continue;
             }
             let dir_path = PathBuf::from(&tab.dir);
-            if dir_path.is_dir() {
-                match crate::workspace::sync(&dir_path, &crate::workspace::store_dir()).await {
-                    Ok(Some(warning)) => eprintln!("workspace sync warning: {warning}"),
-                    Err(e) => eprintln!("workspace sync error: {e}"),
-                    Ok(None) => {}
-                }
+            if !dir_path.is_dir() {
+                continue;
+            }
+            match crate::workspace::sync(&dir_path, &crate::workspace::store_dir()).await {
+                Ok(Some(warning)) => eprintln!("workspace sync warning: {warning}"),
+                Err(e) => eprintln!("workspace sync error: {e}"),
+                Ok(None) => {}
             }
             let resume_path = tab
                 .session_file
@@ -202,8 +205,15 @@ impl ProjectsState {
                 .await
                 .insert(tab.id.clone(), project.clone());
             restored.push(ProjectInfo::from(&*project));
+            kept_tabs.push(tab);
         }
 
+        config.tabs = kept_tabs;
+        if let Some(active_id) = &config.active_tab {
+            if !config.tabs.iter().any(|t| &t.id == active_id) {
+                config.active_tab = config.tabs.first().map(|t| t.id.clone());
+            }
+        }
         let _ = persist::save(&config);
         Ok(restored)
     }

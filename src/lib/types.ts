@@ -55,12 +55,22 @@ export interface UpdateReport {
   restartsPending: string[];
 }
 
+export interface AskQuestion {
+  id: string;
+  question: string;
+  header?: string;
+  options: { label: string; description?: string }[];
+  multi?: boolean;
+  recommended?: number;
+}
+
 export interface UiRequest {
   id: string;
   method: string; // 'select' | 'confirm' | 'input' | 'editor' | 'ask'
   title?: string;
   message?: string;
   options?: string[];
+  questions?: AskQuestion[];
   defaultValue?: string;
 }
 

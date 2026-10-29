@@ -406,5 +406,8 @@ async fn test_phase4_full_smoke_multi_tab_workflow() {
     assert_eq!(restarted.id, tab1.id);
 
     // 7. Clean shutdown of all tabs
+    state.close(&tab1.id).await.expect("close tab 1");
+    state.close(&tab2.id).await.expect("close tab 2");
+    state.close(&tab3.id).await.expect("close tab 3");
     state.shutdown_all().await;
 }
