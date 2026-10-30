@@ -1,93 +1,104 @@
+import { ref, computed, watch } from 'vue';
+import { defineStore } from 'pinia';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import type {
   ProjectState,
-  ProjectStatus,
   ProjectInfo,
   GitStatus,
   RoleInfo,
   ActivityItem,
-  UiRequest,
   AskQuestion,
   Worktree,
   Branches,
   WorkspaceConfig,
 } from '../types';
 
+export interface PaneSizes {
+  left: number[];
+  git: number;
+}
+
 function getBasename(dir: string): string {
   const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
   return parts.pop() || dir;
 }
 
-class ProjectsStore {
-  projects = $state<ProjectState[]>([]);
-  activeProjectId = $state<string | null>(null);
-  paneSizes = $state<{ left: number[]; git: number }>({ left: [20, 55, 25], git: 25 });
+const write = (k: string, v: string | null) => {
+  try {
+    v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v);
+  } catch {}
+};
 
-  private pollInterval: number | undefined = undefined;
-  private subscribedChannels = new Map<string, Channel<Record<string, unknown>>>();
-
-  get activeProject(): ProjectState | null {
-    if (!this.activeProjectId) return null;
-    return this.projects.find((p) => p.id === this.activeProjectId) ?? null;
+const read = (k: string) => {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
   }
+};
 
-  constructor() {
-    this.loadLocalPreferences();
-    this.startGitPolling();
-  }
-
-  private loadLocalPreferences() {
-    try {
-      const savedPanes = localStorage.getItem('bide_pane_sizes');
-      if (savedPanes) {
-        this.paneSizes = JSON.parse(savedPanes);
-      }
-      const savedActive = localStorage.getItem('bide_active_tab');
-      if (savedActive) {
-        this.activeProjectId = savedActive;
-      }
-    } catch {
-      // Ignore local storage errors
+function parsePanes(raw: string | null): PaneSizes | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.left) && typeof parsed.git === 'number') {
+      return parsed as PaneSizes;
     }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export const useProjectsStore = defineStore('projects', () => {
+  const projects = ref<ProjectState[]>([]);
+  const paneSizes = ref<PaneSizes>(parsePanes(read('bide_pane_sizes')) ?? { left: [20, 55, 25], git: 25 });
+  const activeProjectId = ref<string | null>(read('bide_active_tab'));
+
+  watch(paneSizes, (v) => write('bide_pane_sizes', JSON.stringify(v)), { deep: true, flush: 'sync' });
+  watch(activeProjectId, (id) => write('bide_active_tab', id), { flush: 'sync' });
+
+  let pollInterval: number | undefined = undefined;
+  const subscribedChannels = new Map<string, Channel<Record<string, unknown>>>();
+  let debugSeq = 0;
+
+  const activeProject = computed<ProjectState | null>(() => {
+    if (!activeProjectId.value) return null;
+    return projects.value.find((p) => p.id === activeProjectId.value) ?? null;
+  });
+
+  function savePaneSizes(sizes: PaneSizes) {
+    paneSizes.value = sizes;
   }
 
-  savePaneSizes(sizes: { left: number[]; git: number }) {
-    this.paneSizes = sizes;
-    try {
-      localStorage.setItem('bide_pane_sizes', JSON.stringify(sizes));
-    } catch {
-      // Ignore
-    }
+  function setActiveTab(id: string) {
+    activeProjectId.value = id;
+    refreshGitStatus(id);
+    refreshState(id);
   }
 
-  setActiveTab(id: string) {
-    this.activeProjectId = id;
-    try {
-      localStorage.setItem('bide_active_tab', id);
-    } catch {
-      // Ignore
-    }
-    this.refreshGitStatus(id);
-    this.refreshState(id);
-  }
-
-  private startGitPolling() {
-    clearInterval(this.pollInterval);
-    this.pollInterval = window.setInterval(() => {
-      if (this.activeProjectId) {
-        this.refreshGitStatus(this.activeProjectId);
+  function startGitPolling() {
+    clearInterval(pollInterval);
+    pollInterval = window.setInterval(() => {
+      if (activeProjectId.value) {
+        refreshGitStatus(activeProjectId.value);
       }
     }, 5000);
   }
 
-  async restoreProjects(): Promise<void> {
+  function stopGitPolling() {
+    clearInterval(pollInterval);
+    pollInterval = undefined;
+  }
+
+  async function restoreProjects(): Promise<void> {
     try {
       const restored = await invoke<ProjectInfo[]>('projects_restore');
       if (!restored || restored.length === 0) return;
 
       for (const info of restored) {
-        if (this.projects.some((p) => p.id === info.id)) continue;
+        if (projects.value.some((p) => p.id === info.id)) continue;
         const project: ProjectState = {
           id: info.id,
           dir: info.dir,
@@ -109,17 +120,17 @@ class ProjectsStore {
           debugLog: [],
           debugOpen: false,
         };
-        this.projects.push(project);
-        this.setupSubscription(project.id);
+        projects.value.push(project);
+        setupSubscription(project.id);
       }
 
-      if (!this.activeProjectId && this.projects.length > 0) {
-        this.setActiveTab(this.projects[0].id);
-      } else if (this.activeProjectId && !this.projects.some((p) => p.id === this.activeProjectId)) {
-        if (this.projects.length > 0) {
-          this.setActiveTab(this.projects[0].id);
+      if (!activeProjectId.value && projects.value.length > 0) {
+        setActiveTab(projects.value[0].id);
+      } else if (activeProjectId.value && !projects.value.some((p) => p.id === activeProjectId.value)) {
+        if (projects.value.length > 0) {
+          setActiveTab(projects.value[0].id);
         } else {
-          this.activeProjectId = null;
+          activeProjectId.value = null;
         }
       }
     } catch (err) {
@@ -127,7 +138,7 @@ class ProjectsStore {
     }
   }
 
-  async openProject(chosenDir?: string): Promise<string | null> {
+  async function openProject(chosenDir?: string): Promise<string | null> {
     let dir = chosenDir;
     if (!dir) {
       const selected = await open({
@@ -144,9 +155,9 @@ class ProjectsStore {
 
     try {
       const info = await invoke<ProjectInfo>('project_open', { dir });
-      const existing = this.projects.find((p) => p.id === info.id);
+      const existing = projects.value.find((p) => p.id === info.id);
       if (existing) {
-        this.setActiveTab(existing.id);
+        setActiveTab(existing.id);
         return existing.id;
       }
 
@@ -172,9 +183,9 @@ class ProjectsStore {
         debugOpen: false,
       };
 
-      this.projects.push(project);
-      this.setActiveTab(project.id);
-      this.setupSubscription(project.id);
+      projects.value.push(project);
+      setActiveTab(project.id);
+      setupSubscription(project.id);
       return project.id;
     } catch (err) {
       console.error('Failed to open project:', err);
@@ -182,41 +193,37 @@ class ProjectsStore {
     }
   }
 
-  async closeProject(id: string): Promise<void> {
+  async function closeProject(id: string): Promise<void> {
     try {
       await invoke('project_close', { id });
     } catch (err) {
       console.error('Failed to close project backend:', err);
     }
 
-    this.subscribedChannels.delete(id);
-    const idx = this.projects.findIndex((p) => p.id === id);
+    subscribedChannels.delete(id);
+    const idx = projects.value.findIndex((p) => p.id === id);
     if (idx !== -1) {
-      this.projects.splice(idx, 1);
+      projects.value.splice(idx, 1);
     }
 
-    if (this.activeProjectId === id) {
-      if (this.projects.length > 0) {
+    if (activeProjectId.value === id) {
+      if (projects.value.length > 0) {
         const nextIdx = Math.max(0, idx - 1);
-        this.setActiveTab(this.projects[nextIdx].id);
+        setActiveTab(projects.value[nextIdx].id);
       } else {
-        this.activeProjectId = null;
-        try {
-          localStorage.removeItem('bide_active_tab');
-        } catch {
-          // Ignore
-        }
+        activeProjectId.value = null;
       }
     }
   }
-  async closeActiveProject(): Promise<void> {
-    if (this.activeProjectId) {
-      await this.closeProject(this.activeProjectId);
+
+  async function closeActiveProject(): Promise<void> {
+    if (activeProjectId.value) {
+      await closeProject(activeProjectId.value);
     }
   }
 
-  async restartProject(id: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function restartProject(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     project.status = 'starting';
@@ -226,8 +233,8 @@ class ProjectsStore {
     try {
       await invoke<ProjectInfo>('project_restart', { id });
       project.status = 'ready';
-      this.refreshState(id);
-      this.refreshGitStatus(id);
+      refreshState(id);
+      refreshGitStatus(id);
     } catch (err) {
       project.status = 'error';
       const msg = typeof err === 'string' ? err : (err as Error)?.message || String(err);
@@ -236,29 +243,26 @@ class ProjectsStore {
     }
   }
 
-
-  private setupSubscription(id: string) {
-    if (this.subscribedChannels.has(id)) return;
+  function setupSubscription(id: string) {
+    if (subscribedChannels.has(id)) return;
 
     const channel = new Channel<Record<string, unknown>>((frame) => {
-      this.handleFrame(id, frame);
+      handleFrame(id, frame);
     });
-    this.subscribedChannels.set(id, channel);
+    subscribedChannels.set(id, channel);
 
     invoke('omp_subscribe', { id, channel }).catch((err) => {
       console.error(`Failed to subscribe channel for ${id}:`, err);
     });
   }
-  private debugSeq = 0;
 
-  /** Keep a ring buffer of raw RPC frames (both directions) for the debug pane. */
-  private recordDebug(project: ProjectState, frame: Record<string, unknown>, type: string) {
+  function recordDebug(project: ProjectState, frame: Record<string, unknown>, type: string) {
     const out = type === 'rpc_out';
     const f = out ? (frame.frame as Record<string, unknown>) : frame;
     const t = typeof f?.type === 'string' ? f.type : '?';
     const d = new Date();
     project.debugLog.push({
-      id: this.debugSeq++,
+      id: debugSeq++,
       time: `${d.toLocaleTimeString('en-GB')}.${String(d.getMilliseconds()).padStart(3, '0')}`,
       dir: out ? 'out' : 'in',
       kind: t === 'response' && typeof f.command === 'string' ? `response:${f.command}` : t,
@@ -267,21 +271,19 @@ class ProjectsStore {
     if (project.debugLog.length > 500) project.debugLog.splice(0, project.debugLog.length - 500);
   }
 
-
-  private handleFrame(id: string, frame: Record<string, unknown>) {
-    const project = this.projects.find((p) => p.id === id);
+  function handleFrame(id: string, frame: Record<string, unknown>) {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     const type = typeof frame.type === 'string' ? frame.type : '';
-    this.recordDebug(project, frame, type);
+    recordDebug(project, frame, type);
     if (type === 'rpc_out') return;
-
 
     switch (type) {
       case 'ready':
         project.status = 'ready';
-        this.refreshState(id);
-        this.refreshGitStatus(id);
+        refreshState(id);
+        refreshGitStatus(id);
         break;
 
       case 'agent_start':
@@ -291,12 +293,11 @@ class ProjectsStore {
 
       case 'agent_end': {
         project.isStreaming = false;
-        // Close anything left open (e.g. aborted turn) so nothing shows as running forever.
         const now = Date.now();
         for (const a of project.activityLog) {
           if (!a.endedAt && (a.type === 'thinking' || a.type === 'tool_call')) a.endedAt = now;
         }
-        this.refreshState(id);
+        refreshState(id);
         break;
       }
 
@@ -305,7 +306,6 @@ class ProjectsStore {
         if (!ev || typeof ev.type !== 'string') break;
         const now = Date.now();
         const log = project.activityLog;
-        // Push, then return the reactive proxy so later mutations trigger updates.
         const add = (item: ActivityItem) => {
           log.push(item);
           return log[log.length - 1];
@@ -319,7 +319,6 @@ class ProjectsStore {
           const c = ci === undefined ? undefined : content?.[ci];
           return c && c.type === 'toolCall' ? c : undefined;
         };
-        // The call still being written at this content index.
         const generating = () =>
           [...log].reverse().find((a) => a.type === 'tool_call' && a.phase === 'generating' && a.contentIndex === ci);
 
@@ -442,7 +441,6 @@ class ProjectsStore {
       case 'extension_ui_request': {
         const method = (frame.method as string) || '';
         if (method === 'cancel') {
-          // omp timed out / aborted the dialog; close it
           if (project.pendingUiRequest?.id === frame.targetId) project.pendingUiRequest = null;
           break;
         }
@@ -476,7 +474,7 @@ class ProjectsStore {
       case 'session_settled':
         project.status = 'ready';
         project.isStreaming = false;
-        this.refreshGitStatus(id);
+        refreshGitStatus(id);
         break;
 
       case 'process_exited': {
@@ -490,13 +488,13 @@ class ProjectsStore {
 
       case 'model_changed':
       case 'thinking_level_changed':
-        this.refreshState(id);
+        refreshState(id);
         break;
     }
   }
 
-  async sendPrompt(id: string, text: string, streamingBehavior?: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function sendPrompt(id: string, text: string, streamingBehavior?: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     let promptText = text;
@@ -531,10 +529,10 @@ class ProjectsStore {
     }
   }
 
-  async abortPrompt(id: string): Promise<void> {
+  async function abortPrompt(id: string): Promise<void> {
     try {
       await invoke('omp_abort', { id });
-      const project = this.projects.find((p) => p.id === id);
+      const project = projects.value.find((p) => p.id === id);
       if (project) {
         project.isStreaming = false;
       }
@@ -543,8 +541,8 @@ class ProjectsStore {
     }
   }
 
-  async newSession(id: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function newSession(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     try {
@@ -552,20 +550,20 @@ class ProjectsStore {
       project.lastPrompt = null;
       project.activityLog = [];
       project.errorStderr = null;
-      this.refreshState(id);
+      refreshState(id);
     } catch (err) {
       console.error('Failed to start new session:', err);
       throw err;
     }
   }
 
-  setOrchestrate(id: string, value: boolean) {
-    const project = this.projects.find((p) => p.id === id);
+  function setOrchestrate(id: string, value: boolean) {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
     project.orchestrate = value;
   }
 
-  async listRoles(id: string): Promise<RoleInfo[]> {
+  async function listRoles(id: string): Promise<RoleInfo[]> {
     try {
       return await invoke<RoleInfo[]>('omp_list_roles', { id });
     } catch (err) {
@@ -574,22 +572,22 @@ class ProjectsStore {
     }
   }
 
-  async setRole(id: string, role: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function setRole(id: string, role: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     try {
       await invoke('omp_set_role', { id, role });
       project.role = role;
-      this.refreshState(id);
+      refreshState(id);
     } catch (err) {
       console.error('Failed to set role:', err);
       throw err;
     }
   }
 
-  async toggleAdvisor(id: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function toggleAdvisor(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     const nextAdvisor = !project.advisor;
@@ -604,7 +602,7 @@ class ProjectsStore {
     }
   }
 
-  async runReview(id: string): Promise<void> {
+  async function runReview(id: string): Promise<void> {
     try {
       await invoke('omp_command', { id, slash: '/review' });
     } catch (err) {
@@ -613,23 +611,30 @@ class ProjectsStore {
     }
   }
 
-  async respondUi(id: string, response: Record<string, unknown>): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  function setGitError(id: string, err: unknown) {
+    const project = projects.value.find((p) => p.id === id);
+    if (!project) return;
+    const msg = typeof err === 'string' ? err : (err as Error)?.message || String(err);
+    project.errorStderr = msg;
+  }
+
+  async function respondUi(id: string, response: Record<string, unknown>): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     const reqId = project?.pendingUiRequest?.id;
     if (!project || !reqId) return;
     project.pendingUiRequest = null;
-    response = { type: 'extension_ui_response', id: reqId, ...response };
+    const payload = { type: 'extension_ui_response', id: reqId, ...response };
 
     try {
-      await invoke('omp_ui_respond', { id, response });
+      await invoke('omp_ui_respond', { id, response: payload });
     } catch (err) {
       console.error('Failed to respond to UI request:', err);
       throw err;
     }
   }
 
-  async refreshState(id: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function refreshState(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     try {
@@ -661,8 +666,8 @@ class ProjectsStore {
     }
   }
 
-  async refreshGitStatus(id: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function refreshGitStatus(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     if (!project) return;
 
     try {
@@ -673,81 +678,81 @@ class ProjectsStore {
     }
   }
 
-  async gitStage(id: string, path: string): Promise<void> {
+  async function gitStage(id: string, path: string): Promise<void> {
     try {
       await invoke('git_stage', { id, path });
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async gitUnstage(id: string, path: string): Promise<void> {
+  async function gitUnstage(id: string, path: string): Promise<void> {
     try {
       await invoke('git_unstage', { id, path });
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async gitAddAll(id: string): Promise<void> {
+  async function gitAddAll(id: string): Promise<void> {
     try {
       await invoke('git_add_all', { id });
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async gitCommit(id: string, msg: string): Promise<void> {
+  async function gitCommit(id: string, msg: string): Promise<void> {
     try {
       await invoke('git_commit', { id, msg });
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async gitPush(id: string): Promise<void> {
+  async function gitPush(id: string): Promise<void> {
     try {
       await invoke('git_push', { id });
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async gitPull(id: string): Promise<void> {
+  async function gitPull(id: string): Promise<void> {
     try {
       await invoke('git_pull', { id });
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async gitFetch(id: string): Promise<void> {
-    const project = this.projects.find((p) => p.id === id);
+  async function gitFetch(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
     try {
       await invoke('git_fetch', { id });
       if (project) {
         project.lastFetched = new Date();
       }
-      await this.refreshGitStatus(id);
+      await refreshGitStatus(id);
     } catch (err) {
-      this.setGitError(id, err);
+      setGitError(id, err);
       throw err;
     }
   }
 
-  async getGitStatusText(id: string): Promise<string> {
+  async function getGitStatusText(id: string): Promise<string> {
     try {
       return await invoke<string>('git_status_text', { id });
     } catch (err) {
@@ -756,20 +761,20 @@ class ProjectsStore {
     }
   }
 
-  async gitInit(id: string): Promise<void> {
+  async function gitInit(id: string): Promise<void> {
     await invoke('git_init', { id });
-    await this.refreshGitStatus(id);
+    await refreshGitStatus(id);
   }
 
-  async listWorktrees(id: string): Promise<Worktree[]> {
+  async function listWorktrees(id: string): Promise<Worktree[]> {
     return await invoke<Worktree[]>('git_worktree_list', { id });
   }
 
-  async listBranches(id: string): Promise<Branches> {
+  async function listBranches(id: string): Promise<Branches> {
     return await invoke<Branches>('git_branches', { id });
   }
 
-  async addWorktree(
+  async function addWorktree(
     id: string,
     branch: string,
     newBranch: boolean,
@@ -778,28 +783,63 @@ class ProjectsStore {
     return await invoke<string>('git_worktree_add', { id, branch, newBranch, base });
   }
 
-  async removeWorktree(id: string, path: string, force: boolean): Promise<void> {
+  async function removeWorktree(id: string, path: string, force: boolean): Promise<void> {
     await invoke('git_worktree_remove', { id, path, force });
   }
 
-  async getWorkspaceConfig(id: string): Promise<WorkspaceConfig> {
+  async function getWorkspaceConfig(id: string): Promise<WorkspaceConfig> {
     return await invoke<WorkspaceConfig>('workspace_config_get', { id });
   }
 
-  async setWorkspaceConfig(id: string, text: string): Promise<void> {
+  async function setWorkspaceConfig(id: string, text: string): Promise<void> {
     await invoke('workspace_config_set', { id, text });
   }
 
-  listDir(id: string, rel: string): Promise<{ name: string; is_dir: boolean }[]> {
+  function listDir(id: string, rel: string): Promise<{ name: string; is_dir: boolean }[]> {
     return invoke('fs_list_dir', { id, rel });
   }
 
-  private setGitError(id: string, err: unknown) {
-    const project = this.projects.find((p) => p.id === id);
-    if (!project) return;
-    const msg = typeof err === 'string' ? err : (err as Error)?.message || String(err);
-    project.errorStderr = msg;
-  }
-}
-
-export const projectsStore = new ProjectsStore();
+  return {
+    projects,
+    activeProjectId,
+    paneSizes,
+    activeProject,
+    savePaneSizes,
+    setActiveTab,
+    startGitPolling,
+    stopGitPolling,
+    restoreProjects,
+    openProject,
+    closeProject,
+    closeActiveProject,
+    restartProject,
+    handleFrame,
+    sendPrompt,
+    abortPrompt,
+    newSession,
+    setOrchestrate,
+    listRoles,
+    setRole,
+    toggleAdvisor,
+    runReview,
+    respondUi,
+    refreshState,
+    refreshGitStatus,
+    gitStage,
+    gitUnstage,
+    gitAddAll,
+    gitCommit,
+    gitPush,
+    gitPull,
+    gitFetch,
+    getGitStatusText,
+    gitInit,
+    listWorktrees,
+    listBranches,
+    addWorktree,
+    removeWorktree,
+    getWorkspaceConfig,
+    setWorkspaceConfig,
+    listDir,
+  };
+});

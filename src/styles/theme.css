@@ -77,23 +77,23 @@ code, pre, kbd, samp {
 }
 
 /* Pane dividers: a 6px line plus an invisible ±6px grab zone so the resize cursor is easy to hit. */
-[data-pane-resizer] {
+[data-resize-handle] {
   position: relative;
   z-index: 10;
 }
-[data-pane-resizer]::after {
+[data-resize-handle]::after {
   content: '';
   position: absolute;
 }
-[data-pane-resizer][data-direction='horizontal'] {
+[data-resize-handle][data-orientation='horizontal'] {
   width: 6px;
 }
-[data-pane-resizer][data-direction='horizontal']::after {
+[data-resize-handle][data-orientation='horizontal']::after {
   inset: 0 -6px;
 }
-[data-pane-resizer][data-direction='vertical'] {
+[data-resize-handle][data-orientation='vertical'] {
   height: 6px;
 }
-[data-pane-resizer][data-direction='vertical']::after {
+[data-resize-handle][data-orientation='vertical']::after {
   inset: -6px 0;
 }

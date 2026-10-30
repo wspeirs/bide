@@ -1,9 +1,10 @@
 import './styles/theme.css';
-import { mount } from 'svelte';
-import App from './App.svelte';
+import { createApp } from 'vue';
+import { createPinia } from 'pinia';
+import App from './App.vue';
 
-const app = mount(App, {
-  target: document.getElementById('app')!,
-});
+const app = createApp(App);
+app.use(createPinia());
+app.mount('#app');
 
 export default app;
