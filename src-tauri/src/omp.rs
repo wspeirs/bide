@@ -1,9 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -20,6 +20,33 @@ use tokio::{
 
 pub const MAX_REASSEMBLED_FRAME_BYTES: usize = 67_108_864; // 64 MiB
 pub const STDERR_RING_BUFFER_CAPACITY: usize = 200;
+
+/// Bundled omp extension that hosts an omp Collab room for each RPC session (see omp-collab/build.ts).
+const COLLAB_EXTENSION: &str = include_str!("../../omp-collab/omp-collab.js");
+
+/// Writes the bundled collab extension where omp can load it. None (sessions run without
+/// collab) if it cannot be written; collab is optional, spawning must not fail over it.
+fn collab_extension_path() -> Option<&'static Path> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = dirs::cache_dir()?.join("bide").join("omp-collab.js");
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(path.parent().expect("cache path has a parent"))?;
+            if std::fs::read(&path).ok().as_deref() != Some(COLLAB_EXTENSION.as_bytes()) {
+                std::fs::write(&path, COLLAB_EXTENSION)?;
+            }
+            Ok(())
+        };
+        match write() {
+            Ok(()) => Some(path),
+            Err(e) => {
+                eprintln!("bide: omp collab extension unavailable: {e}");
+                None
+            }
+        }
+    })
+    .as_deref()
+}
 
 pub type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
 pub type TauriChannels = Arc<Mutex<Vec<tauri::ipc::Channel<Value>>>>;
@@ -228,12 +255,17 @@ pub struct OmpSession {
     is_settled: Arc<AtomicBool>,
     is_streaming: Arc<AtomicBool>,
     model: Arc<Mutex<Option<Value>>>,
+    ext_statuses: Arc<Mutex<HashMap<String, String>>>,
+    pid: Option<u32>,
 }
 
 impl OmpSession {
     pub async fn spawn(cwd: &Path, resume_file: Option<&Path>) -> Result<Arc<Self>, String> {
         let mut cmd = Command::new("omp");
         cmd.arg("--mode").arg("rpc-ui");
+        if let Some(ext) = collab_extension_path() {
+            cmd.arg("--extension").arg(ext);
+        }
         if let Some(resume) = resume_file {
             cmd.arg("--resume").arg(resume);
         }
@@ -246,6 +278,7 @@ impl OmpSession {
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn omp: {e}"))?;
+        let pid = child.id();
 
         let stdin = child
             .stdin
@@ -299,6 +332,7 @@ impl OmpSession {
         let is_streaming = Arc::new(AtomicBool::new(false));
         let session_file = Arc::new(Mutex::new(None));
         let model = Arc::new(Mutex::new(None));
+        let ext_statuses = Arc::new(Mutex::new(HashMap::new()));
 
         let pending_clone = Arc::clone(&pending_requests);
         let tauri_clone = Arc::clone(&tauri_channels);
@@ -307,6 +341,7 @@ impl OmpSession {
         let settled_clone = Arc::clone(&is_settled);
         let streaming_clone = Arc::clone(&is_streaming);
         let stderr_buf_for_exit = Arc::clone(&stderr_buf);
+        let ext_statuses_clone = Arc::clone(&ext_statuses);
 
         let stdout_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
@@ -314,6 +349,15 @@ impl OmpSession {
             while let Ok(Some(line)) = reader.next_line().await {
                 match process_line(&line, &mut assembler) {
                     Ok(Some(frame)) => {
+                        if frame["type"] == "extension_ui_request" && frame["method"] == "setStatus"
+                        {
+                            if let Some(key) = frame["statusKey"].as_str() {
+                                ext_statuses_clone.lock().unwrap().insert(
+                                    key.to_string(),
+                                    frame["statusText"].as_str().unwrap_or("").to_string(),
+                                );
+                            }
+                        }
                         route_frame(
                             frame,
                             &pending_clone,
@@ -368,6 +412,8 @@ impl OmpSession {
             is_settled,
             is_streaming,
             model,
+            ext_statuses,
+            pid,
         });
 
         // 1) Waits for {"type": "ready", ...} frame.
@@ -415,6 +461,19 @@ impl OmpSession {
             .request(ask)
             .await
             .map_err(|e| format!("Handshake set_ask_dialog failed: {e}"))?;
+
+        // 4b) Sends set_subagent_subscription { level: "events" } (non-fatal)
+        if let Some(sub) = serde_json::json!({
+            "type": "set_subagent_subscription",
+            "level": "events"
+        })
+        .as_object()
+        .cloned()
+        {
+            if let Err(e) = session.request(sub).await {
+                eprintln!("set_subagent_subscription failed: {e}");
+            }
+        }
 
         // 5) Sends get_state (extract and cache sessionFile, isSettled, isStreaming, model)
         session
@@ -539,6 +598,12 @@ impl OmpSession {
         Ok(res)
     }
 
+    pub async fn get_messages(&self) -> Result<Value, String> {
+        let mut map = serde_json::Map::new();
+        map.insert("type".to_string(), Value::String("get_messages".to_string()));
+        self.request(map).await
+    }
+
     pub async fn new_session(&self) -> Result<Value, String> {
         let mut map = serde_json::Map::new();
         map.insert(
@@ -598,6 +663,10 @@ impl OmpSession {
         self.model.lock().unwrap().clone()
     }
 
+    pub fn ext_statuses(&self) -> HashMap<String, String> {
+        self.ext_statuses.lock().unwrap().clone()
+    }
+
     pub async fn shutdown(&self) -> Result<(), String> {
         // 1. Close stdin: drop writer channel sender
         {
@@ -648,6 +717,7 @@ impl OmpSession {
         let is_settled = Arc::new(AtomicBool::new(true));
         let is_streaming = Arc::new(AtomicBool::new(false));
         let model = Arc::new(Mutex::new(None));
+        let ext_statuses = Arc::new(Mutex::new(HashMap::new()));
 
         let pending_clone = Arc::clone(&pending_requests);
         let tauri_clone = Arc::clone(&tauri_channels);
@@ -690,10 +760,39 @@ impl OmpSession {
             is_settled,
             is_streaming,
             model,
+            ext_statuses,
+            pid: None,
         });
 
         (session, stdin_rx, mock_stdout_tx)
     }
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+}
+
+/// Full-control browser URL of the Collab room hosted by omp process `pid`. Fetched live on
+/// every call: the room (and its link) rotates on new_session/session switch.
+pub async fn collab_link(pid: u32) -> Result<String, String> {
+    let out = Command::new("omp")
+        .args(["collab", "link", &pid.to_string(), "--json"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run omp collab link: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("omp collab link failed ({})", out.status)
+        } else {
+            stderr
+        });
+    }
+    let json: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("Unexpected omp collab link output: {e}"))?;
+    json.get("url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "omp collab link returned no url".to_string())
 }
 
 #[cfg(test)]

@@ -86,6 +86,40 @@ function handleSubmitAsk() {
   });
   store.respondUi(props.project.id, { answers });
 }
+
+const multiSummaryText = computed(() => {
+  const m = props.project.pendingUiRequest?.multi;
+  if (!m) return '';
+  const items = [...m.checked, ...(m.other ? ['Other: ' + m.other] : [])];
+  return items.length ? 'Selected: ' + items.join(', ') : 'Nothing selected';
+});
+
+const doneSelectOption = computed(() => {
+  const req = props.project.pendingUiRequest;
+  if (!req?.multi || !req.options) return undefined;
+  return req.options.find((opt) => /Done selecting$/.test(opt));
+});
+
+const selectOptions = computed(() => {
+  const req = props.project.pendingUiRequest;
+  if (!req?.options) return [];
+  if (!req.multi) return req.options;
+  return req.options.filter((opt) => !/Done selecting$/.test(opt));
+});
+
+function isMultiChecked(opt: string): boolean {
+  const m = props.project.pendingUiRequest?.multi;
+  if (!m) return false;
+  return opt === 'Other (type your own)' ? !!m.other : m.checked.includes(opt);
+}
+
+function multiOptionLabel(opt: string): string {
+  const m = props.project.pendingUiRequest?.multi;
+  if (m && opt === 'Other (type your own)' && m.other) {
+    return `Other: ${m.other}`;
+  }
+  return opt;
+}
 </script>
 
 <template>
@@ -118,6 +152,17 @@ function handleSubmitAsk() {
         </button>
       </div>
 
+      <!-- Multi-select summary -->
+      <div
+        v-if="props.project.pendingUiRequest.method === 'select' && props.project.pendingUiRequest.multi"
+        class="text-xs text-[#bcbec4] px-4 py-2 bg-[#252629]/50 border-b border-[#2b2d30]"
+      >
+        <span>{{ multiSummaryText }}</span>
+        <span v-if="props.project.pendingUiRequest.multi.uncertain" class="text-[#6f737a] ml-1">
+          (omp reports {{ props.project.pendingUiRequest.multi.count }}; some preselected items could not be identified)
+        </span>
+      </div>
+
       <!-- Body -->
       <div class="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
         <div v-if="props.project.pendingUiRequest.message" class="text-xs text-[#bcbec4] leading-relaxed whitespace-pre-wrap">
@@ -126,15 +171,33 @@ function handleSubmitAsk() {
 
         <!-- select -->
         <div v-if="props.project.pendingUiRequest.method === 'select' && props.project.pendingUiRequest.options" class="flex flex-col gap-1.5 pt-1">
-          <button
-            v-for="opt in props.project.pendingUiRequest.options"
-            :key="opt"
-            type="button"
-            @click="handleSelect(opt)"
-            class="w-full text-left px-3 py-2 rounded bg-[#252629] border border-[#393b40] hover:bg-[#2b2d30] hover:border-[#3574f0] text-[#dfe1e5] transition-colors text-xs font-medium cursor-pointer"
-          >
-            {{ opt }}
-          </button>
+          <template v-if="props.project.pendingUiRequest.multi">
+            <button
+              v-for="opt in selectOptions"
+              :key="opt"
+              type="button"
+              @click="handleSelect(opt)"
+              :class="[
+                'w-full text-left px-3 py-2 rounded border text-[#dfe1e5] transition-colors text-xs font-medium cursor-pointer',
+                isMultiChecked(opt)
+                  ? 'bg-[#2b3a5c] border-[#3574f0]'
+                  : 'bg-[#252629] border-[#393b40] hover:bg-[#2b2d30] hover:border-[#3574f0]'
+              ]"
+            >
+              {{ isMultiChecked(opt) ? '☑' : '☐' }} {{ multiOptionLabel(opt) }}
+            </button>
+          </template>
+          <template v-else>
+            <button
+              v-for="opt in props.project.pendingUiRequest.options"
+              :key="opt"
+              type="button"
+              @click="handleSelect(opt)"
+              class="w-full text-left px-3 py-2 rounded bg-[#252629] border border-[#393b40] hover:bg-[#2b2d30] hover:border-[#3574f0] text-[#dfe1e5] transition-colors text-xs font-medium cursor-pointer"
+            >
+              {{ opt }}
+            </button>
+          </template>
         </div>
 
         <!-- confirm -->
@@ -267,7 +330,15 @@ function handleSubmitAsk() {
       </div>
 
       <!-- Footer for select method cancel -->
-      <div v-if="props.project.pendingUiRequest.method === 'select'" class="px-4 py-2 bg-[#252629] border-t border-[#2b2d30] flex justify-end shrink-0">
+      <div v-if="props.project.pendingUiRequest.method === 'select'" class="px-4 py-2 bg-[#252629] border-t border-[#2b2d30] flex justify-end gap-2 shrink-0">
+        <button
+          v-if="props.project.pendingUiRequest.multi && doneSelectOption"
+          type="button"
+          @click="handleSelect(doneSelectOption)"
+          class="px-4 py-1.5 rounded bg-[#3574f0] hover:bg-[#3574f0]/90 text-white font-medium transition-colors text-xs cursor-pointer"
+        >
+          Done selecting
+        </button>
         <button
           type="button"
           @click="cancel"

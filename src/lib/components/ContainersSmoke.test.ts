@@ -4,6 +4,7 @@ import { createTestingPinia } from '@pinia/testing';
 import { nextTick, reactive } from 'vue';
 import { SplitterGroup } from 'reka-ui';
 import ProjectView from './ProjectView.vue';
+import ActivityPane from './ActivityPane.vue';
 import App from '../../App.vue';
 import { useProjectsStore } from '../stores/projects';
 import type { ProjectState } from '../types';
@@ -12,6 +13,8 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockImplementation((cmd: string) => {
     if (cmd === 'projects_restore') return Promise.resolve([]);
     if (cmd === 'omp_list_roles') return Promise.resolve([]);
+    if (cmd === 'omp_list_thinking_levels') return Promise.resolve(['off', 'high']);
+    if (cmd === 'omp_list_models') return Promise.resolve([]);
     if (cmd === 'git_worktree_list') return Promise.resolve([]);
     if (cmd === 'git_branches') return Promise.resolve({ local: [], remote: [] });
     if (cmd === 'fs_list_dir') return Promise.resolve([]);
@@ -53,10 +56,16 @@ function makeProject(overrides: Partial<ProjectState> = {}): ProjectState {
     orchestrate: false,
     role: 'default',
     advisor: false,
-    lastPrompt: 'echo test',
+    history: [{ id: 'h1', prompt: 'echo test', response: null }],
+    subagents: [],
+    caveman: 'off',
+    ponytail: 'off',
+    rtk: false,
     activityLog: [],
     isStreaming: false,
     model: 'gpt-4o',
+    modelKey: 'openai/gpt-4o',
+    thinking: 'off',
     contextPercent: 12.5,
     pendingUiRequest: null,
     gitStatus: {
@@ -142,6 +151,38 @@ describe('Containers smoke tests', () => {
     // Now renders ProjectView instead of empty state
     expect(wrapper.findComponent(ProjectView).exists()).toBe(true);
     expect(wrapper.text()).not.toContain('Welcome to bide');
+    wrapper.unmount();
+  });
+
+  it('ActivityPane shows full intent and tool output when chevron is clicked', async () => {
+    const pinia = createTestingPinia({ createSpy: vi.fn, stubActions: false });
+    const project = makeProject({
+      activityLog: [
+        {
+          id: 'tc-1',
+          type: 'tool_call',
+          tool: 'wait',
+          intent: 'Waiting up to 5m for ingest-daily-metrics to finish',
+          args: {},
+          output: 'ingest-daily-metrics completed',
+          phase: 'done',
+          isError: false,
+        },
+      ],
+    });
+
+    const wrapper = mount(ActivityPane, {
+      props: { project },
+      global: { plugins: [pinia] },
+    });
+
+    expect(wrapper.text()).not.toContain('ingest-daily-metrics completed');
+    const btn = wrapper.findAll('button').find((b) => b.text().includes('wait'));
+    expect(btn).toBeTruthy();
+    await btn!.trigger('click');
+
+    expect(wrapper.text()).toContain('Waiting up to 5m for ingest-daily-metrics to finish');
+    expect(wrapper.text()).toContain('ingest-daily-metrics completed');
     wrapper.unmount();
   });
 });

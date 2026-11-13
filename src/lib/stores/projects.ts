@@ -7,11 +7,14 @@ import type {
   ProjectInfo,
   GitStatus,
   RoleInfo,
+  ModelInfo,
   ActivityItem,
   AskQuestion,
   Worktree,
   Branches,
   WorkspaceConfig,
+  PromptEntry,
+  SubagentInfo,
 } from '../types';
 
 export interface PaneSizes {
@@ -51,6 +54,245 @@ function parsePanes(raw: string | null): PaneSizes | null {
   }
 }
 
+function contentText(content: unknown): string {
+  return typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content
+          .filter((p) => p && typeof p === 'object' && (p as Record<string, unknown>).type === 'text')
+          .map((p) => String((p as Record<string, unknown>).text ?? ''))
+          .join('\n')
+      : '';
+}
+
+function promptText(msg: Record<string, unknown> | undefined): string | null {
+  const isUser = msg?.role === 'user' && msg?.attribution !== 'agent';
+  const isCollab = msg?.role === 'custom' && msg?.customType === 'collab-prompt';
+  if (!isUser && !isCollab) return null;
+  return contentText(msg?.content).replace(/^orchestrate\n\n/, '');
+}
+
+export function finalResponse(log: ActivityItem[]): string {
+  let lastTool = -1;
+  for (let i = log.length - 1; i >= 0; i--) {
+    if (log[i].type === 'tool_call') {
+      lastTool = i;
+      break;
+    }
+  }
+  return log
+    .slice(lastTool + 1)
+    .filter((a) => a.type === 'text')
+    .map((a) => a.text ?? '')
+    .join('\n\n')
+    .trim();
+}
+
+function closeOpenItems(log: ActivityItem[]) {
+  const now = Date.now();
+  for (const a of log) {
+    if (!a.endedAt && (a.type === 'thinking' || a.type === 'tool_call')) a.endedAt = now;
+  }
+}
+
+function extractToolOutput(res: unknown): string | undefined {
+  if (res == null) return undefined;
+  if (typeof res === 'string') return res;
+  if (typeof res === 'object' && 'content' in res && Array.isArray(res.content)) {
+    const parts = res.content
+      .map((c) => {
+        if (c && typeof c === 'object' && 'type' in c && c.type === 'text' && 'text' in c && typeof c.text === 'string') {
+          return c.text;
+        }
+        return JSON.stringify(c);
+      })
+      .filter(Boolean);
+    return parts.length ? parts.join('\n') : undefined;
+  }
+  try {
+    return JSON.stringify(res, null, 2);
+  } catch {
+    return String(res);
+  }
+}
+
+function applyAgentEvent(log: ActivityItem[], frame: Record<string, unknown>) {
+  switch (frame.type) {
+    case 'message_update': {
+      const ev = frame.assistantMessageEvent as Record<string, unknown> | undefined;
+      if (!ev || typeof ev.type !== 'string') break;
+      const now = Date.now();
+      const add = (item: ActivityItem) => {
+        log.push(item);
+        return log[log.length - 1];
+      };
+      const last = () => log[log.length - 1];
+      const ci = ev.contentIndex as number | undefined;
+      const partialCall = () => {
+        const content = (ev.partial as Record<string, unknown> | undefined)?.content as
+          | Record<string, unknown>[]
+          | undefined;
+        const c = ci === undefined ? undefined : content?.[ci];
+        return c && c.type === 'toolCall' ? c : undefined;
+      };
+      const generating = () =>
+        [...log].reverse().find((a) => a.type === 'tool_call' && a.phase === 'generating' && a.contentIndex === ci);
+
+      switch (ev.type) {
+        case 'thinking_start':
+          add({ id: crypto.randomUUID(), type: 'thinking', text: '', startedAt: now });
+          break;
+
+        case 'thinking_delta': {
+          let t = last();
+          if (!(t && t.type === 'thinking' && !t.endedAt)) {
+            t = add({ id: crypto.randomUUID(), type: 'thinking', text: '', startedAt: now });
+          }
+          t.text = (t.text || '') + ((ev.delta as string) || '');
+          break;
+        }
+
+        case 'thinking_end': {
+          const t = last();
+          if (t && t.type === 'thinking' && !t.endedAt) t.endedAt = now;
+          break;
+        }
+
+        case 'text_delta': {
+          const delta = (ev.delta as string) || '';
+          const l = last();
+          if (l && l.type === 'text') {
+            l.text = (l.text || '') + delta;
+          } else {
+            add({ id: crypto.randomUUID(), type: 'text', text: delta, time: new Date().toLocaleTimeString() });
+          }
+          break;
+        }
+
+        case 'toolcall_start':
+          add({
+            id: crypto.randomUUID(),
+            type: 'tool_call',
+            tool: (partialCall()?.name as string) || 'tool',
+            contentIndex: ci,
+            phase: 'generating',
+            argsChars: 0,
+            startedAt: now,
+          });
+          break;
+
+        case 'toolcall_delta': {
+          const item = generating();
+          if (!item) break;
+          item.argsChars = (item.argsChars || 0) + ((ev.delta as string) || '').length;
+          const pc = partialCall();
+          if (pc) {
+            item.tool = (pc.name as string) || item.tool;
+            item.args = pc.arguments;
+            const a = pc.arguments;
+            if (a && typeof a === 'object' && 'i' in a && typeof a.i === 'string') item.intent = a.i;
+          }
+          break;
+        }
+
+        case 'toolcall_end': {
+          const tc = ev.toolCall as Record<string, unknown> | undefined;
+          if (!tc) break;
+          const callId = (tc.id as string) || crypto.randomUUID();
+          const item =
+            generating() ??
+            log.find((a) => a.callId === callId) ??
+            add({ id: crypto.randomUUID(), type: 'tool_call', startedAt: now });
+          item.callId = callId;
+          item.tool = (tc.name as string) || item.tool || 'tool';
+          item.args = tc.arguments;
+          const a = tc.arguments;
+          item.intent =
+            (tc.intent as string) ||
+            (a && typeof a === 'object' && 'i' in a && typeof a.i === 'string' ? a.i : undefined) ||
+            item.intent;
+          item.phase = 'running';
+          break;
+        }
+      }
+      break;
+    }
+
+    case 'tool_execution_start': {
+      const callId = (frame.toolCallId as string) || crypto.randomUUID();
+      const item =
+        log.find((a) => a.callId === callId) ??
+        (() => {
+          log.push({ id: crypto.randomUUID(), type: 'tool_call', callId, startedAt: Date.now() });
+          return log[log.length - 1];
+        })();
+      item.tool = (frame.toolName as string) || item.tool || 'tool';
+      item.intent = (frame.intent as string) || item.intent;
+      item.args = frame.args ?? item.args;
+      item.phase = 'running';
+      break;
+    }
+
+    case 'tool_execution_update': {
+      const item = log.find((a) => a.callId === (frame.toolCallId as string));
+      if (item) {
+        const out = extractToolOutput(frame.partialResult);
+        if (out !== undefined) item.output = out;
+      }
+      break;
+    }
+
+    case 'tool_execution_end': {
+      const item = log.find((a) => a.callId === (frame.toolCallId as string));
+      if (item) {
+        item.isError = Boolean(frame.isError);
+        item.phase = 'done';
+        item.endedAt = Date.now();
+        const out = extractToolOutput(frame.result);
+        if (out !== undefined) item.output = out;
+      }
+      break;
+    }
+  }
+}
+
+function applyStatus(project: ProjectState, key: unknown, text: unknown) {
+  const plain = String(text ?? '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+  if (key === 'caveman') {
+    project.caveman = plain.match(/caveman:\s*([a-z]+)/i)?.[1].toLowerCase() ?? 'off';
+  } else if (key === 'rtk') {
+    project.rtk = /rtk:\s*on/i.test(plain);
+  } else if (key === 'ponytail') {
+    project.ponytail = plain.match(/ponytail:.*?([a-z]+)\s*$/i)?.[1].toLowerCase() ?? 'off';
+  }
+}
+
+const SELECTED_PREFIX = /^\((\d+) selected\) /;
+const DONE_OPTION = /Done selecting$/;
+const OTHER_OPTION = 'Other (type your own)';
+
+function askPrechecked(log: ActivityItem[], options: string[]): string[] {
+  let html: string | null = null;
+  for (let i = log.length - 1; i >= 0; i--) {
+    const a = log[i];
+    if (a.type === 'tool_call' && a.tool === 'ask' && a.phase !== 'done') {
+      const args = a.args as Record<string, unknown> | undefined;
+      if (typeof args?.html === 'string') {
+        html = args.html;
+        break;
+      }
+    }
+  }
+  if (!html) return [];
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const result: string[] = [];
+  for (const input of doc.querySelectorAll('input[type=checkbox][checked]')) {
+    const label = (input.closest('label')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    if (options.includes(label)) result.push(label);
+  }
+  return result;
+}
+
 export const useProjectsStore = defineStore('projects', () => {
   const projects = ref<ProjectState[]>([]);
   const paneSizes = ref<PaneSizes>(parsePanes(read('bide_pane_sizes')) ?? { left: [20, 55, 25], git: 25 });
@@ -61,6 +303,14 @@ export const useProjectsStore = defineStore('projects', () => {
 
   let pollInterval: number | undefined = undefined;
   const subscribedChannels = new Map<string, Channel<Record<string, unknown>>>();
+  const runStarting = new Set<string>();
+  interface MultiLoop {
+    base: string;
+    checked: Set<string>;
+    other?: string;
+    lastPick?: string;
+  }
+  const multiLoops = new Map<string, MultiLoop>();
   let debugSeq = 0;
 
   const activeProject = computed<ProjectState | null>(() => {
@@ -108,10 +358,16 @@ export const useProjectsStore = defineStore('projects', () => {
           orchestrate: info.orchestrate ?? false,
           role: info.role ?? 'default',
           advisor: info.advisor ?? false,
-          lastPrompt: null,
+          history: [],
+          subagents: [],
+          caveman: 'off',
+          ponytail: 'off',
+          rtk: false,
           activityLog: [],
           isStreaming: false,
           model: 'loading…',
+          modelKey: '',
+          thinking: '',
           contextPercent: 0,
           pendingUiRequest: null,
           gitStatus: null,
@@ -122,6 +378,7 @@ export const useProjectsStore = defineStore('projects', () => {
         };
         projects.value.push(project);
         setupSubscription(project.id);
+        loadHistory(project.id);
       }
 
       if (!activeProjectId.value && projects.value.length > 0) {
@@ -170,10 +427,16 @@ export const useProjectsStore = defineStore('projects', () => {
         orchestrate: info.orchestrate ?? false,
         role: info.role ?? 'default',
         advisor: info.advisor ?? false,
-        lastPrompt: null,
+        history: [],
+        subagents: [],
+        caveman: 'off',
+        ponytail: 'off',
+        rtk: false,
         activityLog: [],
         isStreaming: false,
         model: 'loading…',
+        modelKey: '',
+        thinking: '',
         contextPercent: 0,
         pendingUiRequest: null,
         gitStatus: null,
@@ -186,6 +449,7 @@ export const useProjectsStore = defineStore('projects', () => {
       projects.value.push(project);
       setActiveTab(project.id);
       setupSubscription(project.id);
+      loadHistory(project.id);
       return project.id;
     } catch (err) {
       console.error('Failed to open project:', err);
@@ -271,6 +535,25 @@ export const useProjectsStore = defineStore('projects', () => {
     if (project.debugLog.length > 500) project.debugLog.splice(0, project.debugLog.length - 500);
   }
 
+  function upsertSubagent(project: ProjectState, p: Record<string, unknown>): SubagentInfo {
+    const sid = String(p.id);
+    const existing = project.subagents.find((s) => s.id === sid);
+    if (existing) {
+      if (typeof p.agent === 'string' && p.agent) existing.agent = p.agent;
+      if (typeof p.description === 'string') existing.description = p.description;
+      return existing;
+    }
+    project.subagents.push({
+      id: sid,
+      agent: (p.agent as string) || 'agent',
+      description: p.description as string | undefined,
+      status: 'running',
+      activityLog: [],
+      startedAt: Date.now(),
+    });
+    return project.subagents[project.subagents.length - 1];
+  }
+
   function handleFrame(id: string, frame: Record<string, unknown>) {
     const project = projects.value.find((p) => p.id === id);
     if (!project) return;
@@ -289,143 +572,39 @@ export const useProjectsStore = defineStore('projects', () => {
       case 'agent_start':
         project.status = 'busy';
         project.isStreaming = true;
+        runStarting.add(id);
         break;
 
       case 'agent_end': {
         project.isStreaming = false;
-        const now = Date.now();
-        for (const a of project.activityLog) {
-          if (!a.endedAt && (a.type === 'thinking' || a.type === 'tool_call')) a.endedAt = now;
+        closeOpenItems(project.activityLog);
+        runStarting.delete(id);
+        if (project.history.length) {
+          project.history[project.history.length - 1].response = finalResponse(project.activityLog) || null;
         }
         refreshState(id);
         break;
       }
 
-      case 'message_update': {
-        const ev = frame.assistantMessageEvent as Record<string, unknown> | undefined;
-        if (!ev || typeof ev.type !== 'string') break;
-        const now = Date.now();
-        const log = project.activityLog;
-        const add = (item: ActivityItem) => {
-          log.push(item);
-          return log[log.length - 1];
-        };
-        const last = () => log[log.length - 1];
-        const ci = ev.contentIndex as number | undefined;
-        const partialCall = () => {
-          const content = (ev.partial as Record<string, unknown> | undefined)?.content as
-            | Record<string, unknown>[]
-            | undefined;
-          const c = ci === undefined ? undefined : content?.[ci];
-          return c && c.type === 'toolCall' ? c : undefined;
-        };
-        const generating = () =>
-          [...log].reverse().find((a) => a.type === 'tool_call' && a.phase === 'generating' && a.contentIndex === ci);
-
-        switch (ev.type) {
-          case 'thinking_start':
-            add({ id: crypto.randomUUID(), type: 'thinking', text: '', startedAt: now });
-            break;
-
-          case 'thinking_delta': {
-            let t = last();
-            if (!(t && t.type === 'thinking' && !t.endedAt)) {
-              t = add({ id: crypto.randomUUID(), type: 'thinking', text: '', startedAt: now });
-            }
-            t.text = (t.text || '') + ((ev.delta as string) || '');
-            break;
-          }
-
-          case 'thinking_end': {
-            const t = last();
-            if (t && t.type === 'thinking' && !t.endedAt) t.endedAt = now;
-            break;
-          }
-
-          case 'text_delta': {
-            const delta = (ev.delta as string) || '';
-            const l = last();
-            if (l && l.type === 'text') {
-              l.text = (l.text || '') + delta;
-            } else {
-              add({ id: crypto.randomUUID(), type: 'text', text: delta, time: new Date().toLocaleTimeString() });
-            }
-            break;
-          }
-
-          case 'toolcall_start':
-            add({
-              id: crypto.randomUUID(),
-              type: 'tool_call',
-              tool: (partialCall()?.name as string) || 'tool',
-              contentIndex: ci,
-              phase: 'generating',
-              argsChars: 0,
-              startedAt: now,
-            });
-            break;
-
-          case 'toolcall_delta': {
-            const item = generating();
-            if (!item) break;
-            item.argsChars = (item.argsChars || 0) + ((ev.delta as string) || '').length;
-            const pc = partialCall();
-            if (pc) {
-              item.tool = (pc.name as string) || item.tool;
-              item.args = pc.arguments;
-              const a = pc.arguments;
-              if (a && typeof a === 'object' && 'i' in a && typeof a.i === 'string') item.intent = a.i;
-            }
-            break;
-          }
-
-          case 'toolcall_end': {
-            const tc = ev.toolCall as Record<string, unknown> | undefined;
-            if (!tc) break;
-            const callId = (tc.id as string) || crypto.randomUUID();
-            const item =
-              generating() ??
-              log.find((a) => a.callId === callId) ??
-              add({ id: crypto.randomUUID(), type: 'tool_call', startedAt: now });
-            item.callId = callId;
-            item.tool = (tc.name as string) || item.tool || 'tool';
-            item.args = tc.arguments;
-            const a = tc.arguments;
-            item.intent =
-              (tc.intent as string) ||
-              (a && typeof a === 'object' && 'i' in a && typeof a.i === 'string' ? a.i : undefined) ||
-              item.intent;
-            item.phase = 'running';
-            break;
-          }
+      case 'message_start': {
+        const text = promptText(frame.message as Record<string, unknown> | undefined);
+        if (text === null) break;
+        if (runStarting.delete(id) || project.history.length === 0) {
+          project.activityLog = [];
+          project.subagents = [];
+          project.history.push({ id: crypto.randomUUID(), prompt: text, response: null });
+        } else {
+          project.history[project.history.length - 1].prompt += '\n\n' + text;
         }
         break;
       }
 
-      case 'tool_execution_start': {
-        const callId = (frame.toolCallId as string) || crypto.randomUUID();
-        const item =
-          project.activityLog.find((a) => a.callId === callId) ??
-          (() => {
-            project.activityLog.push({ id: crypto.randomUUID(), type: 'tool_call', callId, startedAt: Date.now() });
-            return project.activityLog[project.activityLog.length - 1];
-          })();
-        item.tool = (frame.toolName as string) || item.tool || 'tool';
-        item.intent = (frame.intent as string) || item.intent;
-        item.args = frame.args ?? item.args;
-        item.phase = 'running';
+      case 'message_update':
+      case 'tool_execution_start':
+      case 'tool_execution_update':
+      case 'tool_execution_end':
+        applyAgentEvent(project.activityLog, frame);
         break;
-      }
-
-      case 'tool_execution_end': {
-        const item = project.activityLog.find((a) => a.callId === (frame.toolCallId as string));
-        if (item) {
-          item.isError = Boolean(frame.isError);
-          item.phase = 'done';
-          item.endedAt = Date.now();
-        }
-        break;
-      }
 
       case 'command_output': {
         const text = (frame.text as string) || '';
@@ -440,20 +619,92 @@ export const useProjectsStore = defineStore('projects', () => {
 
       case 'extension_ui_request': {
         const method = (frame.method as string) || '';
+        if (method === 'setStatus') {
+          applyStatus(project, frame.statusKey, frame.statusText);
+          break;
+        }
         if (method === 'cancel') {
           if (project.pendingUiRequest?.id === frame.targetId) project.pendingUiRequest = null;
           break;
         }
         if (['select', 'confirm', 'input', 'editor', 'ask'].includes(method)) {
-          project.pendingUiRequest = {
-            id: (frame.id as string) || crypto.randomUUID(),
-            method,
-            title: (frame.title as string) || undefined,
-            message: (frame.message as string) || undefined,
-            options: Array.isArray(frame.options) ? (frame.options as string[]) : undefined,
-            questions: Array.isArray(frame.questions) ? (frame.questions as AskQuestion[]) : undefined,
-            defaultValue: (frame.defaultValue as string) || undefined,
-          };
+          if (method !== 'select' && method !== 'input') {
+            multiLoops.delete(id);
+          }
+          if (method === 'select') {
+            const raw = String(frame.title ?? '');
+            const m = SELECTED_PREFIX.exec(raw);
+            const base = m ? raw.slice(m[0].length) : raw;
+            const options = (frame.options as string[]) ?? [];
+            let st = multiLoops.get(id);
+            if (!st || st.base !== base) {
+              st = { base, checked: new Set(askPrechecked(project.activityLog, options)) };
+            } else {
+              if (st.lastPick === OTHER_OPTION) {
+                st.other = undefined;
+              } else if (st.lastPick && !DONE_OPTION.test(st.lastPick)) {
+                if (st.checked.has(st.lastPick)) st.checked.delete(st.lastPick);
+                else st.checked.add(st.lastPick);
+              }
+              st.lastPick = undefined;
+            }
+            multiLoops.set(id, st);
+            const isMulti = !!m || options.some((o) => DONE_OPTION.test(o));
+            const count = m ? Number(m[1]) : 0;
+            project.pendingUiRequest = {
+              id: (frame.id as string) || crypto.randomUUID(),
+              method,
+              title: base || undefined,
+              message: (frame.message as string) || undefined,
+              options: Array.isArray(frame.options) ? (frame.options as string[]) : undefined,
+              questions: Array.isArray(frame.questions) ? (frame.questions as AskQuestion[]) : undefined,
+              defaultValue: (frame.defaultValue as string) || undefined,
+              ...(isMulti
+                ? {
+                    multi: {
+                      checked: [...st.checked],
+                      other: st.other,
+                      count,
+                      uncertain: count !== st.checked.size + (st.other ? 1 : 0),
+                    },
+                  }
+                : {}),
+            };
+          } else {
+            project.pendingUiRequest = {
+              id: (frame.id as string) || crypto.randomUUID(),
+              method,
+              title: (frame.title as string) || undefined,
+              message: (frame.message as string) || undefined,
+              options: Array.isArray(frame.options) ? (frame.options as string[]) : undefined,
+              questions: Array.isArray(frame.questions) ? (frame.questions as AskQuestion[]) : undefined,
+              defaultValue: (frame.defaultValue as string) || undefined,
+            };
+          }
+        }
+        break;
+      }
+
+      case 'subagent_lifecycle': {
+        const p = (frame.payload ?? {}) as Record<string, unknown>;
+        const sa = upsertSubagent(project, p);
+        const status = String(p.status ?? '');
+        if (status === 'started') {
+          sa.status = 'running';
+        } else {
+          sa.status = status as SubagentInfo['status'];
+          sa.endedAt = Date.now();
+          closeOpenItems(sa.activityLog);
+        }
+        break;
+      }
+
+      case 'subagent_event': {
+        const p = (frame.payload ?? {}) as { id: string; event: Record<string, unknown> };
+        const sa = upsertSubagent(project, { id: p.id });
+        if (p.event) {
+          applyAgentEvent(sa.activityLog, p.event);
+          if (p.event.type === 'agent_end') closeOpenItems(sa.activityLog);
         }
         break;
       }
@@ -502,7 +753,6 @@ export const useProjectsStore = defineStore('projects', () => {
       promptText = `orchestrate\n\n${text}`;
     }
 
-    project.lastPrompt = promptText;
     project.status = 'busy';
     project.isStreaming = true;
     project.errorStderr = null;
@@ -547,7 +797,9 @@ export const useProjectsStore = defineStore('projects', () => {
 
     try {
       await invoke('omp_new_session', { id });
-      project.lastPrompt = null;
+      project.history = [];
+      project.subagents = [];
+      multiLoops.delete(id);
       project.activityLog = [];
       project.errorStderr = null;
       refreshState(id);
@@ -586,6 +838,69 @@ export const useProjectsStore = defineStore('projects', () => {
     }
   }
 
+  async function listModels(id: string): Promise<ModelInfo[]> {
+    try {
+      return await invoke<ModelInfo[]>('omp_list_models', { id });
+    } catch (err) {
+      console.error('Failed to list models:', err);
+      return [];
+    }
+  }
+
+  async function listThinkingLevels(id: string): Promise<string[]> {
+    try {
+      return await invoke<string[]>('omp_list_thinking_levels', { id });
+    } catch (err) {
+      console.error('Failed to list thinking levels:', err);
+      return [];
+    }
+  }
+
+  /** `model` is `provider/modelId`; switches the tab to the custom role. */
+  async function setModel(id: string, model: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
+    if (!project) return;
+    try {
+      await invoke('omp_set_model', { id, model });
+      project.role = 'custom';
+      refreshState(id);
+    } catch (err) {
+      console.error('Failed to set model:', err);
+      throw err;
+    }
+  }
+
+  async function setThinking(id: string, level: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
+    if (!project) return;
+    try {
+      await invoke('omp_set_thinking', { id, level });
+      project.thinking = level;
+      refreshState(id);
+    } catch (err) {
+      console.error('Failed to set thinking level:', err);
+      throw err;
+    }
+  }
+
+  /** Ctrl+P: next role in list order (custom → first role). */
+  async function cycleRole(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
+    const roles = await listRoles(id);
+    if (!project || roles.length === 0) return;
+    const idx = roles.findIndex((r) => r.name === project.role);
+    await setRole(id, roles[(idx + 1) % roles.length].name);
+  }
+
+  /** Shift+Tab: next thinking level the live model supports, wrapping to the first. */
+  async function cycleThinking(id: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
+    const levels = await listThinkingLevels(id);
+    if (!project || levels.length === 0) return;
+    const idx = levels.indexOf(project.thinking);
+    await setThinking(id, levels[(idx + 1) % levels.length]);
+  }
+
   async function toggleAdvisor(id: string): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
     if (!project) return;
@@ -611,6 +926,10 @@ export const useProjectsStore = defineStore('projects', () => {
     }
   }
 
+  async function collabLink(id: string): Promise<string> {
+    return await invoke<string>('omp_collab_link', { id });
+  }
+
   function setGitError(id: string, err: unknown) {
     const project = projects.value.find((p) => p.id === id);
     if (!project) return;
@@ -620,8 +939,21 @@ export const useProjectsStore = defineStore('projects', () => {
 
   async function respondUi(id: string, response: Record<string, unknown>): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
-    const reqId = project?.pendingUiRequest?.id;
+    const req = project?.pendingUiRequest;
+    const reqId = req?.id;
     if (!project || !reqId) return;
+    const st = multiLoops.get(id);
+    if (response.cancelled) {
+      multiLoops.delete(id);
+    } else if (req?.method === 'select' && typeof response.value === 'string') {
+      if (st) {
+        st.lastPick = response.value;
+        if (DONE_OPTION.test(response.value)) multiLoops.delete(id);
+      }
+    } else if (req?.method === 'input' && st?.lastPick === OTHER_OPTION) {
+      st.other = String(response.value ?? '').trim() || undefined;
+      st.lastPick = undefined;
+    }
     project.pendingUiRequest = null;
     const payload = { type: 'extension_ui_response', id: reqId, ...response };
 
@@ -644,8 +976,12 @@ export const useProjectsStore = defineStore('projects', () => {
       if (state.model && typeof state.model === 'object') {
         const m = state.model as Record<string, unknown>;
         project.model = (m.name as string) || (m.id as string) || 'model';
+        project.modelKey = m.provider && m.id ? `${m.provider}/${m.id}` : '';
       } else if (typeof state.model === 'string') {
         project.model = state.model;
+      }
+      if (typeof state.thinkingLevel === 'string') {
+        project.thinking = state.thinkingLevel;
       }
 
       if (state.contextUsage && typeof state.contextUsage === 'object') {
@@ -661,8 +997,46 @@ export const useProjectsStore = defineStore('projects', () => {
       if (state.isSettled === true && project.status === 'busy') {
         project.status = 'ready';
       }
+      const st = await invoke<Record<string, string>>('omp_ext_statuses', { id });
+      for (const [k, v] of Object.entries(st ?? {})) applyStatus(project, k, v);
     } catch {
       // Ignore background state refresh errors
+    }
+  }
+
+  async function loadHistory(id: string): Promise<void> {
+    try {
+      const res = await invoke<unknown>('omp_get_messages', { id });
+      const msgs = Array.isArray(res) ? res : (res as Record<string, unknown> | null)?.messages;
+      if (!Array.isArray(msgs)) return;
+      const built: PromptEntry[] = [];
+      for (const raw of msgs) {
+        const m = raw as Record<string, unknown> | undefined;
+        const prompt = promptText(m);
+        if (prompt !== null) {
+          built.push({ id: crypto.randomUUID(), prompt, response: null });
+        } else if (m?.role === 'assistant' && built.length > 0) {
+          const txt = contentText(m.content).trim();
+          if (txt) built[built.length - 1].response = txt;
+        }
+      }
+      const project = projects.value.find((p) => p.id === id);
+      if (project) project.history = built;
+    } catch {
+      // Ignore background history load errors
+    }
+  }
+
+  async function setAddonMode(id: string, name: 'caveman' | 'ponytail' | 'rtk', value: string): Promise<void> {
+    const project = projects.value.find((p) => p.id === id);
+    if (!project) return;
+    try {
+      await invoke('omp_command', { id, slash: `/${name} ${value}` });
+      if (name === 'rtk') project.rtk = value === 'on';
+      else project[name] = value;
+    } catch (err) {
+      console.error(`Failed to set ${name}:`, err);
+      throw err;
     }
   }
 
@@ -820,10 +1194,19 @@ export const useProjectsStore = defineStore('projects', () => {
     setOrchestrate,
     listRoles,
     setRole,
+    listModels,
+    listThinkingLevels,
+    setModel,
+    setThinking,
+    cycleRole,
+    cycleThinking,
     toggleAdvisor,
     runReview,
+    collabLink,
     respondUi,
     refreshState,
+    loadHistory,
+    setAddonMode,
     refreshGitStatus,
     gitStage,
     gitUnstage,

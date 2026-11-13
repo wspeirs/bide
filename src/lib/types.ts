@@ -7,6 +7,7 @@ export interface ActivityItem {
   tool?: string;
   intent?: string;
   args?: Record<string, unknown> | unknown;
+  output?: string;
   time?: string;
   isError?: boolean;
   /** Tool call id from omp (links toolcall_end / tool_execution_* frames). */
@@ -44,6 +45,12 @@ export interface RoleInfo {
   selector: string;
 }
 
+export interface ModelInfo {
+  provider: string;
+  id: string;
+  name: string;
+}
+
 export interface UpdateReport {
   success: boolean;
   oldVersion: string;
@@ -72,6 +79,7 @@ export interface UiRequest {
   options?: string[];
   questions?: AskQuestion[];
   defaultValue?: string;
+  multi?: { checked: string[]; other?: string; count: number; uncertain: boolean };
 }
 
 export interface DebugEntry {
@@ -91,6 +99,23 @@ export interface ProjectInfo {
   advisor?: boolean;
 }
 
+export interface PromptEntry {
+  id: string;
+  prompt: string;
+  /** Final assistant text; null while running or when the run produced none. */
+  response: string | null;
+}
+
+export interface SubagentInfo {
+  id: string;
+  agent: string;
+  description?: string;
+  status: 'running' | 'completed' | 'failed' | 'aborted';
+  activityLog: ActivityItem[];
+  startedAt: number;
+  endedAt?: number;
+}
+
 export interface ProjectState {
   id: string;
   dir: string;
@@ -100,10 +125,17 @@ export interface ProjectState {
   orchestrate: boolean;
   role: string;
   advisor: boolean;
-  lastPrompt: string | null;
+  history: PromptEntry[];
+  subagents: SubagentInfo[];
+  caveman: string;
+  ponytail: string;
+  rtk: boolean;
   activityLog: ActivityItem[];
   isStreaming: boolean;
   model: string;
+  /** `provider/modelId` of the live model ('' until known). */
+  modelKey: string;
+  thinking: string;
   contextPercent: number;
   pendingUiRequest: UiRequest | null;
   gitStatus: GitStatus | null;

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount, nextTick } from 'vue';
+import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue';
 import type { ProjectState } from '../types';
+import { finalResponse } from '../stores/projects';
 import TimingSpan from './TimingSpan.vue';
+import Markdown from './Markdown.vue';
 import { ChevronRight, ChevronDown, Wrench, CheckCircle2, AlertCircle, Loader2, Ban } from '@lucide/vue';
 
 const props = defineProps<{
@@ -11,6 +13,14 @@ const props = defineProps<{
 const containerRef = ref<HTMLDivElement | null>(null);
 const userScrolledUp = ref(false);
 const expandedTools = ref<Record<string, boolean>>({});
+
+const view = ref<'raw' | 'rendered'>('raw');
+const selected = ref<string>('main');
+const selectedSub = computed(() => props.project.subagents.find((s) => s.id === selected.value));
+const visibleLog = computed(() => selectedSub.value?.activityLog ?? props.project.activityLog);
+const showRendered = computed(() => !selectedSub.value && view.value === 'rendered');
+const showAgents = computed(() => props.project.orchestrate || props.project.subagents.length > 0);
+const rendered = computed(() => finalResponse(props.project.activityLog));
 
 // Live clock so elapsed times of in-flight items tick while the agent works.
 const now = ref(Date.now());
@@ -51,13 +61,16 @@ function onScroll() {
 
 watch(
   () => {
-    const log = props.project.activityLog;
+    const log = visibleLog.value;
     const last = log[log.length - 1];
     return [
       log.length,
       last?.text?.length,
       last?.argsChars,
+      last?.output?.length,
       props.project.isStreaming,
+      selected.value,
+      view.value,
     ];
   },
   async () => {
@@ -89,7 +102,7 @@ function fmtChars(n: number): string {
     <div class="px-3 py-1 bg-[#252629] border-b border-[#2b2d30] text-[13px] font-mono uppercase tracking-wider text-[#6f737a] select-none flex items-center justify-between shrink-0">
       <span>Activity / Agent Console</span>
       <button
-        v-if="userScrolledUp"
+        v-if="userScrolledUp && !showRendered"
         type="button"
         @click="() => {
           userScrolledUp = false;
@@ -101,12 +114,60 @@ function fmtChars(n: number): string {
       </button>
     </div>
 
-    <div
-      ref="containerRef"
-      @scroll="onScroll"
-      class="flex-1 p-3 font-mono text-[15px] overflow-y-auto leading-relaxed space-y-3"
-    >
-      <template v-for="item in props.project.activityLog" :key="item.id">
+    <div class="flex-1 flex min-h-0">
+      <div
+        v-if="showAgents"
+        class="w-56 shrink-0 border-r border-[#2b2d30] overflow-y-auto bg-[#252629] font-sans text-xs"
+      >
+        <button
+          type="button"
+          @click="selected = 'main'"
+          :class="[
+            'w-full text-left px-2.5 py-2 flex items-center gap-2 border-l-2 transition-colors cursor-pointer',
+            !selectedSub
+              ? 'bg-[#2b2d30] border-[#3574f0]'
+              : 'hover:bg-[#2b2d30]/50 border-transparent',
+          ]"
+        >
+          <Loader2 v-if="project.isStreaming" class="w-3.5 h-3.5 text-[#3574f0] animate-spin shrink-0" />
+          <CheckCircle2 v-else class="w-3.5 h-3.5 text-[#59a869] shrink-0" />
+          <span class="font-semibold text-[#dfe1e5] truncate">Main agent</span>
+        </button>
+
+        <button
+          v-for="sa in project.subagents"
+          :key="sa.id"
+          type="button"
+          @click="selected = sa.id"
+          :class="[
+            'w-full text-left px-2.5 py-2 flex items-start gap-2 border-l-2 transition-colors cursor-pointer',
+            selected === sa.id
+              ? 'bg-[#2b2d30] border-[#3574f0]'
+              : 'hover:bg-[#2b2d30]/50 border-transparent',
+          ]"
+        >
+          <Loader2 v-if="sa.status === 'running'" class="w-3.5 h-3.5 text-[#3574f0] animate-spin shrink-0 mt-0.5" />
+          <CheckCircle2 v-else-if="sa.status === 'completed'" class="w-3.5 h-3.5 text-[#59a869] shrink-0 mt-0.5" />
+          <AlertCircle v-else-if="sa.status === 'failed'" class="w-3.5 h-3.5 text-[#e55765] shrink-0 mt-0.5" />
+          <Ban v-else class="w-3.5 h-3.5 text-[#e2a53b] shrink-0 mt-0.5" />
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center justify-between gap-1">
+              <span class="font-semibold text-[#dfe1e5] truncate">{{ sa.agent }}</span>
+              <TimingSpan :started-at="sa.startedAt" :ended-at="sa.endedAt" :now="now" class="text-[11px] text-[#6f737a] shrink-0" />
+            </div>
+            <div v-if="sa.description" class="truncate text-[#868a91]">{{ sa.description }}</div>
+          </div>
+        </button>
+      </div>
+
+      <div class="flex-1 flex flex-col min-w-0">
+        <div
+          v-if="!showRendered"
+          ref="containerRef"
+          @scroll="onScroll"
+          class="flex-1 p-3 font-mono text-[15px] overflow-y-auto leading-relaxed space-y-3"
+        >
+          <template v-for="item in visibleLog" :key="item.id">
         <!-- thinking -->
         <div
           v-if="item.type === 'thinking' && (item.text || !item.endedAt)"
@@ -165,10 +226,15 @@ function fmtChars(n: number): string {
             </span>
           </button>
           <div
-            v-if="expandedTools[item.id] && item.args"
-            class="p-2 border-t border-[#2b2d30] bg-[#1e1f22] text-[#bcbec4] overflow-x-auto"
+            v-if="expandedTools[item.id] && (item.intent || item.args || item.output)"
+            class="p-2 border-t border-[#2b2d30] bg-[#1e1f22] text-[#bcbec4] overflow-x-auto space-y-2"
           >
-            <pre class="m-0 font-mono text-[13px] whitespace-pre-wrap">{{ formatToolArgs(item.args) }}</pre>
+            <div v-if="item.intent" class="font-mono text-[13px] text-[#dfe1e5] whitespace-pre-wrap break-words">{{ item.intent }}</div>
+            <pre v-if="item.args" class="m-0 font-mono text-[13px] whitespace-pre-wrap break-words">{{ formatToolArgs(item.args) }}</pre>
+            <div v-if="item.output" class="pt-2 border-t border-[#2b2d30]">
+              <div class="text-[11px] font-sans uppercase tracking-wider text-[#6f737a] mb-1">Output</div>
+              <pre class="m-0 font-mono text-[13px] whitespace-pre-wrap break-words text-[#dfe1e5]">{{ item.output }}</pre>
+            </div>
           </div>
         </div>
 
@@ -189,8 +255,42 @@ function fmtChars(n: number): string {
         </div>
       </template>
 
-      <div v-if="props.project.activityLog.length === 0" class="text-[#6f737a] text-xs italic select-none py-4 text-center">
-        No activity yet. Send a prompt below to start.
+          <div v-if="visibleLog.length === 0" class="text-[#6f737a] text-xs italic select-none py-4 text-center">
+            No activity yet. Send a prompt below to start.
+          </div>
+        </div>
+
+        <div v-else class="flex-1 overflow-y-auto p-3">
+          <Markdown v-if="rendered" :source="rendered" />
+          <span v-else class="text-xs italic text-[#6f737a]">No final response yet</span>
+        </div>
+
+        <div v-if="!selectedSub" class="shrink-0 flex border-t border-[#2b2d30] bg-[#252629]">
+          <button
+            type="button"
+            @click="view = 'raw'"
+            :class="[
+              'px-3 py-1.5 text-xs font-sans font-medium transition-colors cursor-pointer',
+              view === 'raw'
+                ? 'text-[#dfe1e5] border-t-2 border-[#3574f0]'
+                : 'text-[#6f737a] hover:text-[#dfe1e5] border-t-2 border-transparent',
+            ]"
+          >
+            Raw
+          </button>
+          <button
+            type="button"
+            @click="view = 'rendered'"
+            :class="[
+              'px-3 py-1.5 text-xs font-sans font-medium transition-colors cursor-pointer',
+              view === 'rendered'
+                ? 'text-[#dfe1e5] border-t-2 border-[#3574f0]'
+                : 'text-[#6f737a] hover:text-[#dfe1e5] border-t-2 border-transparent',
+            ]"
+          >
+            Rendered
+          </button>
+        </div>
       </div>
     </div>
   </div>

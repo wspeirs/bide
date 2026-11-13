@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
@@ -6,7 +7,7 @@ use crate::{
     git::{self, Branches, GitStatus, Worktree},
     persist,
     projects::{ProjectInfo, ProjectsState},
-    roles::{self, RoleInfo},
+    roles::{self, ModelInfo, RoleInfo},
     update::{self, UpdateReport},
     workspace::{self, WorkspaceConfig},
 };
@@ -113,6 +114,24 @@ pub async fn omp_command(
 }
 
 #[tauri::command]
+pub async fn omp_ext_statuses(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<HashMap<String, String>, String> {
+    let project = state.get_project(&id).await?;
+    Ok(project.session.ext_statuses())
+}
+
+#[tauri::command]
+pub async fn omp_get_messages(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<Value, String> {
+    let project = state.get_project(&id).await?;
+    project.session.get_messages().await
+}
+
+#[tauri::command]
 pub async fn omp_ui_respond(
     state: State<'_, ProjectsState>,
     id: String,
@@ -140,6 +159,53 @@ pub async fn omp_set_role(
 ) -> Result<Value, String> {
     state.set_role(&id, &role).await
 }
+
+#[tauri::command]
+pub async fn omp_list_models(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<Vec<ModelInfo>, String> {
+    let project = state.get_project(&id).await?;
+    roles::list_models(&project.session).await
+}
+
+#[tauri::command]
+pub async fn omp_list_thinking_levels(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let project = state.get_project(&id).await?;
+    roles::list_thinking_levels(&project.session).await
+}
+
+#[tauri::command]
+pub async fn omp_set_model(
+    state: State<'_, ProjectsState>,
+    id: String,
+    model: String,
+) -> Result<Value, String> {
+    state.set_model(&id, &model).await
+}
+
+#[tauri::command]
+pub async fn omp_set_thinking(
+    state: State<'_, ProjectsState>,
+    id: String,
+    level: String,
+) -> Result<Value, String> {
+    state.set_thinking(&id, &level).await
+}
+
+#[tauri::command]
+pub async fn omp_collab_link(state: State<'_, ProjectsState>, id: String) -> Result<String, String> {
+    let project = state.get_project(&id).await?;
+    let pid = project
+        .session
+        .pid()
+        .ok_or_else(|| "omp is not running for this tab".to_string())?;
+    crate::omp::collab_link(pid).await
+}
+
 
 #[tauri::command]
 pub async fn git_status(state: State<'_, ProjectsState>, id: String) -> Result<GitStatus, String> {

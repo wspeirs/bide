@@ -10,7 +10,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "verify": "npm test && npm run build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:collab": "bun omp-collab/build.ts"
   },
   "dependencies": {
     "@fontsource/inter": "^5.3.0",
@@ -18,14 +19,17 @@
     "@lucide/vue": "^1.64.0",
     "@tauri-apps/api": "^2.2.0",
     "@tauri-apps/plugin-dialog": "^2.8.3",
+    "markdown-it": "^15.0.3",
     "pinia": "^4.1.0",
     "reka-ui": "^2.11.0",
+    "uqr": "^0.1.3",
     "vue": "^3.5.44"
   },
   "devDependencies": {
     "@pinia/testing": "^2.0.2",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.2.0",
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^26.6.6",
     "@vitejs/plugin-vue": "^6.0.10",
     "@vue/test-utils": "^2.5.1",

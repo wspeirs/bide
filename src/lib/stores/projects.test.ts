@@ -46,10 +46,16 @@ describe('useProjectsStore', () => {
       orchestrate: false,
       role: 'default',
       advisor: false,
-      lastPrompt: null,
+      history: [],
+      subagents: [],
+      caveman: 'off',
+      ponytail: 'off',
+      rtk: false,
       activityLog: [],
       isStreaming: false,
       model: 'test-model',
+      modelKey: 'test/test-model',
+      thinking: 'off',
       contextPercent: 0,
       pendingUiRequest: null,
       gitStatus: null,
@@ -98,6 +104,9 @@ describe('useProjectsStore', () => {
       }
 
       expect(project.pendingUiRequest).toBeNull();
+      expect(project.caveman).toBe('off');
+      expect(project.rtk).toBe(true);
+      expect(project.ponytail).toBe('lite');
     });
 
     it('non-dialog methods (open_url, set_editor_text) open nothing', () => {
@@ -170,6 +179,167 @@ describe('useProjectsStore', () => {
         targetId: 'req-dialog',
       });
       expect(project.pendingUiRequest).toBeNull();
+    });
+
+    it('a collab-prompt message_start records history; other custom messages do not', () => {
+      const store = useProjectsStore();
+      const project = createTestProject('proj-1');
+      store.projects.push(project);
+
+      store.handleFrame('proj-1', { type: 'message_start', message: { role: 'custom', customType: 'xdev-mount-notice', content: 'notice' } });
+      expect(project.history).toEqual([]);
+
+      store.handleFrame('proj-1', { type: 'agent_start' });
+      store.handleFrame('proj-1', { type: 'message_start', message: { role: 'custom', customType: 'collab-prompt', content: 'from phone', details: { from: 'guest' } } });
+
+      store.handleFrame('proj-1', { type: 'agent_start' });
+      store.handleFrame('proj-1', {
+        type: 'message_start',
+        message: { role: 'custom', customType: 'collab-prompt', content: [{ type: 'text', text: 'with image' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }] },
+      });
+      expect(project.history.map((e) => e.prompt)).toEqual(['from phone', 'with image']);
+    });
+
+    it('run lifecycle', () => {
+      const store = useProjectsStore();
+      const project = createTestProject('proj-1');
+      project.activityLog.push({ id: 'old-1', type: 'text', text: 'old' });
+      project.subagents.push({ id: 'old-sa', agent: 'explore', status: 'completed', activityLog: [], startedAt: 1 });
+      store.projects.push(project);
+
+      store.handleFrame('proj-1', { type: 'agent_start' });
+      store.handleFrame('proj-1', {
+        type: 'message_start',
+        message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'orchestrate\n\nfix it' }] },
+      });
+      expect(project.activityLog).toEqual([]);
+      expect(project.subagents).toEqual([]);
+      expect(project.history).toHaveLength(1);
+      expect(project.history[0].prompt).toBe('fix it');
+
+      store.handleFrame('proj-1', {
+        type: 'message_start',
+        message: { role: 'user', attribution: 'agent', content: 'ignored' },
+      });
+      expect(project.history).toHaveLength(1);
+      expect(project.history[0].prompt).toBe('fix it');
+
+      store.handleFrame('proj-1', {
+        type: 'message_start',
+        message: { role: 'user', attribution: 'user', content: 'also this' },
+      });
+      expect(project.history[0].prompt).toBe('fix it\n\nalso this');
+
+      store.handleFrame('proj-1', {
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: 'thinking aloud' },
+      });
+      store.handleFrame('proj-1', {
+        type: 'message_update',
+        assistantMessageEvent: { type: 'toolcall_end', toolCall: { id: 't1', name: 'read', arguments: {} } },
+      });
+      store.handleFrame('proj-1', {
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: '| a |\n|---|' },
+      });
+      store.handleFrame('proj-1', { type: 'agent_end' });
+      expect(project.history[0].response).toBe('| a |\n|---|');
+    });
+
+    it('subagents', () => {
+      const store = useProjectsStore();
+      const project = createTestProject('proj-1');
+      store.projects.push(project);
+
+      store.handleFrame('proj-1', {
+        type: 'subagent_lifecycle',
+        payload: { id: '0-Explore', agent: 'explore', description: 'scan', status: 'started', index: 0 },
+      });
+      expect(project.subagents).toHaveLength(1);
+      expect(project.subagents[0].status).toBe('running');
+
+      store.handleFrame('proj-1', {
+        type: 'subagent_event',
+        payload: {
+          id: '0-Explore',
+          event: { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'hmm' } },
+        },
+      });
+      expect(project.subagents[0].activityLog).toHaveLength(1);
+      expect(project.subagents[0].activityLog[0]).toMatchObject({ type: 'thinking', text: 'hmm' });
+      expect(project.activityLog).toEqual([]);
+
+      store.handleFrame('proj-1', {
+        type: 'subagent_lifecycle',
+        payload: { id: '0-Explore', agent: 'explore', status: 'completed', index: 0 },
+      });
+      expect(project.subagents[0].status).toBe('completed');
+      expect(project.subagents[0].endedAt).toBeDefined();
+    });
+
+    it('multi-select loop', async () => {
+      const store = useProjectsStore();
+      const project = createTestProject('proj-1');
+      project.activityLog.push({
+        id: 'ask-1',
+        type: 'tool_call',
+        tool: 'ask',
+        phase: 'running',
+        args: {
+          html: '<form><fieldset><legend>4. Which</legend><label><input type="checkbox" name="e" value="a" checked> Aug 13 (prior)</label><label><input type="checkbox" name="e" value="b"> Nov 20 (upcoming)</label></fieldset></form>',
+        },
+      });
+      store.projects.push(project);
+
+      const options = ['Aug 13 (prior)', 'Nov 20 (upcoming)', 'Other (type your own)', '\uf00c Done selecting'];
+      store.handleFrame('proj-1', {
+        type: 'extension_ui_request',
+        id: 'r1',
+        method: 'select',
+        title: '(1 selected) 4. Which',
+        options,
+      });
+      expect(project.pendingUiRequest?.title).toBe('4. Which');
+      expect(project.pendingUiRequest?.multi?.checked).toEqual(['Aug 13 (prior)']);
+      expect(project.pendingUiRequest?.multi?.uncertain).toBe(false);
+
+      await store.respondUi('proj-1', { value: 'Nov 20 (upcoming)' });
+      store.handleFrame('proj-1', {
+        type: 'extension_ui_request',
+        id: 'r2',
+        method: 'select',
+        title: '(2 selected) 4. Which',
+        options,
+      });
+      expect(project.pendingUiRequest?.multi?.checked).toEqual(['Aug 13 (prior)', 'Nov 20 (upcoming)']);
+
+      await store.respondUi('proj-1', { value: 'Aug 13 (prior)' });
+      store.handleFrame('proj-1', {
+        type: 'extension_ui_request',
+        id: 'r3',
+        method: 'select',
+        title: '(1 selected) 4. Which',
+        options,
+      });
+      expect(project.pendingUiRequest?.multi?.checked).toEqual(['Nov 20 (upcoming)']);
+
+      await store.respondUi('proj-1', { value: 'Other (type your own)' });
+      store.handleFrame('proj-1', {
+        type: 'extension_ui_request',
+        id: 'r4',
+        method: 'input',
+        title: '4. Which',
+      });
+      await store.respondUi('proj-1', { value: ' late ' });
+      store.handleFrame('proj-1', {
+        type: 'extension_ui_request',
+        id: 'r5',
+        method: 'select',
+        title: '(2 selected) 4. Which',
+        options,
+      });
+      expect(project.pendingUiRequest?.multi?.other).toBe('late');
+      expect(project.pendingUiRequest?.multi?.uncertain).toBe(false);
     });
   });
 
@@ -330,6 +500,74 @@ describe('useProjectsStore', () => {
       store.stopGitPolling();
       vi.advanceTimersByTime(10000);
       expect(invoke).toHaveBeenCalledTimes(2); // No further calls
+    });
+  });
+
+  describe('6. Ctrl+P / Shift+Tab cycling', () => {
+    function mockInvoke(responses: Record<string, unknown>) {
+      vi.mocked(invoke).mockImplementation((cmd: string) => Promise.resolve(responses[cmd]));
+    }
+
+    it('cycleThinking advances and wraps from the last level to the first', async () => {
+      const store = useProjectsStore();
+      const project = createTestProject();
+      store.projects.push(project);
+      mockInvoke({ omp_list_thinking_levels: ['off', 'low', 'high'] });
+
+      project.thinking = 'low';
+      await store.cycleThinking('proj-1');
+      expect(invoke).toHaveBeenCalledWith('omp_set_thinking', { id: 'proj-1', level: 'high' });
+      expect(project.thinking).toBe('high');
+
+      await store.cycleThinking('proj-1');
+      expect(invoke).toHaveBeenCalledWith('omp_set_thinking', { id: 'proj-1', level: 'off' });
+      expect(project.thinking).toBe('off');
+    });
+
+    it('cycleRole goes from custom to the first role and wraps past the last', async () => {
+      const store = useProjectsStore();
+      const project = createTestProject();
+      store.projects.push(project);
+      mockInvoke({ omp_list_roles: [{ name: 'default', selector: 'a/b' }, { name: 'smol', selector: 'c/d' }] });
+
+      project.role = 'custom';
+      await store.cycleRole('proj-1');
+      expect(project.role).toBe('default');
+      await store.cycleRole('proj-1');
+      expect(project.role).toBe('smol');
+      await store.cycleRole('proj-1');
+      expect(project.role).toBe('default');
+    });
+  });
+
+  describe('7. Tool execution output', () => {
+    it('captures partialResult and final result text on tool_call items', () => {
+      const store = useProjectsStore();
+      const project = createTestProject();
+      store.projects.push(project);
+
+      store.handleFrame('proj-1', {
+        type: 'tool_execution_start',
+        toolCallId: 'call-1',
+        toolName: 'bash',
+        args: { command: 'echo hi' },
+        intent: 'Running echo',
+      });
+      store.handleFrame('proj-1', {
+        type: 'tool_execution_update',
+        toolCallId: 'call-1',
+        partialResult: { content: [{ type: 'text', text: 'hi\n' }] },
+      });
+      expect(project.activityLog[0].output).toBe('hi\n');
+
+      store.handleFrame('proj-1', {
+        type: 'tool_execution_end',
+        toolCallId: 'call-1',
+        result: { content: [{ type: 'text', text: 'hi\ndone\n' }], details: { wallTimeMs: 5 } },
+        isError: false,
+      });
+      expect(project.activityLog[0].phase).toBe('done');
+      expect(project.activityLog[0].output).toBe('hi\ndone\n');
     });
   });
 });

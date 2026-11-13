@@ -12,6 +12,18 @@ pub struct RoleInfo {
     pub selector: String,
 }
 
+/// Trimmed `get_available_models` entry; the raw catalog is several MiB.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub provider: String,
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `role` value marking a tab whose model was picked directly instead of via a role.
+pub const CUSTOM_ROLE: &str = "custom";
+
 pub const VALID_THINKING_LEVELS: &[&str] = &[
     "off", "minimal", "low", "medium", "high", "xhigh", "max", "adaptive",
 ];
@@ -138,6 +150,47 @@ pub async fn get_model_roles(cwd: &Path) -> Result<HashMap<String, String>, Stri
         .map_err(|e| format!("Failed to deserialize modelRoles map: {e}"))
 }
 
+async fn send(session: &OmpSession, cmd: serde_json::Value) -> Result<serde_json::Value, String> {
+    match cmd {
+        serde_json::Value::Object(map) => session.request(map).await,
+        _ => Err("RPC command must be a JSON object".to_string()),
+    }
+}
+
+/// `model` is `provider/modelId`; the model id itself may contain `/`.
+pub async fn set_model(session: &OmpSession, model: &str) -> Result<serde_json::Value, String> {
+    let (provider, model_id) = model
+        .split_once('/')
+        .ok_or_else(|| format!("Model must be 'provider/modelId', got '{model}'"))?;
+    send(session, serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model_id })).await
+}
+
+pub async fn set_thinking(session: &OmpSession, level: &str) -> Result<serde_json::Value, String> {
+    send(session, serde_json::json!({ "type": "set_thinking_level", "level": level })).await
+}
+
+pub async fn list_models(session: &OmpSession) -> Result<Vec<ModelInfo>, String> {
+    #[derive(Deserialize)]
+    struct Res {
+        models: Vec<ModelInfo>,
+    }
+    let res = send(session, serde_json::json!({ "type": "get_available_models" })).await?;
+    serde_json::from_value::<Res>(res)
+        .map(|r| r.models)
+        .map_err(|e| format!("Failed to parse available models: {e}"))
+}
+
+pub async fn list_thinking_levels(session: &OmpSession) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct Res {
+        levels: Vec<String>,
+    }
+    let res = send(session, serde_json::json!({ "type": "get_available_thinking_levels" })).await?;
+    serde_json::from_value::<Res>(res)
+        .map(|r| r.levels)
+        .map_err(|e| format!("Failed to parse thinking levels: {e}"))
+}
+
 /// Resolves role selector and applies model and optional thinking level to the session.
 pub async fn set_role(
     session: &OmpSession,
@@ -154,33 +207,11 @@ pub async fn set_role(
     let mut last_err = String::new();
     for candidate in candidates {
         let (provider, model_id, thinking_level) = parse_candidate(candidate);
-        let mut model_cmd = serde_json::Map::new();
-        model_cmd.insert(
-            "type".to_string(),
-            serde_json::Value::String("set_model".to_string()),
-        );
-        model_cmd.insert(
-            "provider".to_string(),
-            serde_json::Value::String(provider),
-        );
-        model_cmd.insert(
-            "modelId".to_string(),
-            serde_json::Value::String(model_id),
-        );
-
-        match session.request(model_cmd).await {
+        let cmd = serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model_id });
+        match send(session, cmd).await {
             Ok(model_data) => {
                 if let Some(level) = thinking_level {
-                    let mut think_cmd = serde_json::Map::new();
-                    think_cmd.insert(
-                        "type".to_string(),
-                        serde_json::Value::String("set_thinking_level".to_string()),
-                    );
-                    think_cmd.insert(
-                        "level".to_string(),
-                        serde_json::Value::String(level),
-                    );
-                    if let Err(e) = session.request(think_cmd).await {
+                    if let Err(e) = set_thinking(session, &level).await {
                         return Err(format!("Model set but failed to set thinking level: {e}"));
                     }
                 }
@@ -195,6 +226,28 @@ pub async fn set_role(
     Err(format!(
         "All candidate models failed for role '{role_name}'. Last error: {last_err}"
     ))
+}
+
+/// Re-applies a tab's persisted selection to a freshly spawned session (best effort).
+pub async fn apply_selection(
+    session: &OmpSession,
+    cwd: &Path,
+    role: &str,
+    model: Option<&str>,
+    thinking: Option<&str>,
+) {
+    match model {
+        Some(m) if role == CUSTOM_ROLE => {
+            let _ = set_model(session, m).await;
+        }
+        _ if role != "default" => {
+            let _ = set_role(session, cwd, role).await;
+        }
+        _ => {}
+    }
+    if let Some(level) = thinking {
+        let _ = set_thinking(session, level).await;
+    }
 }
 
 #[cfg(test)]

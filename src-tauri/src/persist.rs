@@ -30,6 +30,10 @@ pub struct TabConfig {
     pub role: String,
     #[serde(default)]
     pub advisor: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 fn default_role() -> String {
@@ -169,6 +173,8 @@ mod tests {
                     orchestrate: true,
                     role: "planner".to_string(),
                     advisor: true,
+                    model: Some("anthropic/claude-sonnet-5-5".to_string()),
+                    thinking: Some("high".to_string()),
                 },
                 TabConfig {
                     id: "tab-def".to_string(),
@@ -177,6 +183,8 @@ mod tests {
                     orchestrate: false,
                     role: "default".to_string(),
                     advisor: false,
+                    model: None,
+                    thinking: None,
                 },
             ],
         };

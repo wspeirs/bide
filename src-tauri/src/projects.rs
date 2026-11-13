@@ -32,6 +32,10 @@ pub struct Project {
     pub orchestrate: bool,
     pub role: String,
     pub advisor: bool,
+    /// `provider/modelId` when `role == roles::CUSTOM_ROLE`.
+    pub model: Option<String>,
+    /// Thinking level override on top of the role/model.
+    pub thinking: Option<String>,
     pub restart_pending: Arc<AtomicBool>,
     pub channels: Arc<Mutex<Vec<tauri::ipc::Channel<serde_json::Value>>>>,
 }
@@ -86,6 +90,8 @@ impl ProjectsState {
             orchestrate: false,
             role: "default".to_string(),
             advisor: false,
+            model: None,
+            thinking: None,
             restart_pending: Arc::new(AtomicBool::new(false)),
             channels: Arc::new(Mutex::new(Vec::new())),
         });
@@ -103,6 +109,8 @@ impl ProjectsState {
             orchestrate: false,
             role: "default".to_string(),
             advisor: false,
+            model: None,
+            thinking: None,
         });
         config.active_tab = Some(id);
         let _ = persist::save(&config);
@@ -177,9 +185,7 @@ impl ProjectsState {
                 }
             };
 
-            if tab.role != "default" {
-                let _ = roles::set_role(&session, &dir_path, &tab.role).await;
-            }
+            roles::apply_selection(&session, &dir_path, &tab.role, tab.model.as_deref(), tab.thinking.as_deref()).await;
 
             if tab.advisor {
                 let _ = session.command("/advisor on").await;
@@ -196,6 +202,8 @@ impl ProjectsState {
                 orchestrate: tab.orchestrate,
                 role: tab.role.clone(),
                 advisor: tab.advisor,
+                model: tab.model.clone(),
+                thinking: tab.thinking.clone(),
                 restart_pending: Arc::new(AtomicBool::new(false)),
                 channels: Arc::new(Mutex::new(Vec::new())),
             });
@@ -247,9 +255,14 @@ impl ProjectsState {
             }
         }
 
-        if existing.role != "default" {
-            let _ = roles::set_role(&new_session, &existing.dir, &existing.role).await;
-        }
+        roles::apply_selection(
+            &new_session,
+            &existing.dir,
+            &existing.role,
+            existing.model.as_deref(),
+            existing.thinking.as_deref(),
+        )
+        .await;
 
         if existing.advisor {
             let _ = new_session.command("/advisor on").await;
@@ -267,6 +280,8 @@ impl ProjectsState {
             orchestrate: existing.orchestrate,
             role: existing.role.clone(),
             advisor: existing.advisor,
+            model: existing.model.clone(),
+            thinking: existing.thinking.clone(),
             restart_pending: existing.restart_pending.clone(),
             channels: existing.channels.clone(),
         });
@@ -371,22 +386,48 @@ impl ProjectsState {
         Ok(())
     }
 
+    /// Selecting a role drops any custom model and thinking override.
     pub async fn set_role(&self, id: &str, role: &str) -> Result<serde_json::Value, String> {
         let project = self.get_project(id).await?;
         let res = roles::set_role(&project.session, &project.dir, role).await?;
+        self.save_selection(id, role, None, None).await;
+        Ok(res)
+    }
+
+    /// Switches to `roles::CUSTOM_ROLE`; keeps the thinking override.
+    pub async fn set_model(&self, id: &str, model: &str) -> Result<serde_json::Value, String> {
+        let project = self.get_project(id).await?;
+        let res = roles::set_model(&project.session, model).await?;
+        self.save_selection(id, roles::CUSTOM_ROLE, Some(model.to_string()), project.thinking.clone())
+            .await;
+        Ok(res)
+    }
+
+    pub async fn set_thinking(&self, id: &str, level: &str) -> Result<serde_json::Value, String> {
+        let project = self.get_project(id).await?;
+        let res = roles::set_thinking(&project.session, level).await?;
+        self.save_selection(id, &project.role, project.model.clone(), Some(level.to_string()))
+            .await;
+        Ok(res)
+    }
+
+    async fn save_selection(&self, id: &str, role: &str, model: Option<String>, thinking: Option<String>) {
         {
             let mut lock = self.projects.lock().await;
             if let Some(proj) = lock.get_mut(id) {
                 let mut updated = (**proj).clone();
                 updated.role = role.to_string();
+                updated.model = model.clone();
+                updated.thinking = thinking.clone();
                 *proj = Arc::new(updated);
             }
         }
         let mut config = persist::load();
         if let Some(tab) = config.tabs.iter_mut().find(|t| t.id == id) {
             tab.role = role.to_string();
+            tab.model = model;
+            tab.thinking = thinking;
             let _ = persist::save(&config);
         }
-        Ok(res)
     }
 }

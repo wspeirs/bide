@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useProjectsStore } from '../stores/projects';
-import type { ProjectState, RoleInfo } from '../types';
-import { Users, Shield, RotateCcw, Square, Check, ChevronDown, Sparkles } from '@lucide/vue';
+import type { ProjectState, RoleInfo, ModelInfo } from '../types';
+import { Users, Shield, RotateCcw, Square, Check, ChevronDown, Sparkles, QrCode, Brain, Terminal } from '@lucide/vue';
+import CollabModal from './CollabModal.vue';
+
+const CAVEMAN_LEVELS = ['off', 'lite', 'full', 'ultra', 'wenyan'] as const;
+const PONYTAIL_LEVELS = ['off', 'lite', 'full', 'ultra'] as const;
 
 const props = defineProps<{
   project: ProjectState;
@@ -13,6 +17,41 @@ const store = useProjectsStore();
 const roles = ref<RoleInfo[]>([]);
 const isRoleMenuOpen = ref(false);
 const menuPos = ref({ left: 0, bottom: 0 });
+const collabOpen = ref(false);
+const models = ref<ModelInfo[]>([]);
+const thinkingLevels = ref<string[]>([]);
+const isCustom = computed(() => props.project.role === 'custom');
+
+const modelGroups = computed(() => {
+  const groups = new Map<string, ModelInfo[]>();
+  for (const m of models.value) {
+    if (!groups.has(m.provider)) groups.set(m.provider, []);
+    groups.get(m.provider)!.push(m);
+  }
+  return groups;
+});
+// Keep the live values selectable while lists load or when discovery omits them.
+const modelListed = computed(() => models.value.some((m) => `${m.provider}/${m.id}` === props.project.modelKey));
+const thinkingOptions = computed(() => {
+  const t = props.project.thinking;
+  return !t || thinkingLevels.value.includes(t) ? thinkingLevels.value : [t, ...thinkingLevels.value];
+});
+
+// Supported levels depend on the live model.
+watch(
+  () => props.project.modelKey,
+  async (key) => {
+    if (key) thinkingLevels.value = await store.listThinkingLevels(props.project.id);
+  },
+  { immediate: true },
+);
+watch(
+  isCustom,
+  async (custom) => {
+    if (custom && models.value.length === 0) models.value = await store.listModels(props.project.id);
+  },
+  { immediate: true },
+);
 
 // Fixed position so the pane's overflow-hidden can't clip the menu.
 function toggleRoleMenu(e: MouseEvent) {
@@ -56,6 +95,20 @@ async function selectRole(roleName: string) {
   isRoleMenuOpen.value = false;
   await store.setRole(props.project.id, roleName);
 }
+
+// Pin the live model so the model picker starts from what is running now.
+async function selectCustom() {
+  isRoleMenuOpen.value = false;
+  if (!isCustom.value && props.project.modelKey) await store.setModel(props.project.id, props.project.modelKey);
+}
+
+function onModelChange(e: Event) {
+  store.setModel(props.project.id, (e.target as HTMLSelectElement).value);
+}
+
+function onThinkingChange(e: Event) {
+  store.setThinking(props.project.id, (e.target as HTMLSelectElement).value);
+}
 </script>
 
 <template>
@@ -77,15 +130,15 @@ async function selectRole(roleName: string) {
         <span>Orchestrate</span>
       </button>
 
-      <!-- [Role: <current> ▾] dropdown -->
+      <!-- [Model: <role> ▾] dropdown: roles + Custom -->
       <div class="relative">
         <button
           type="button"
           @click="toggleRoleMenu"
-          title="Select model role"
+          title="Select model role (Ctrl+P in the prompt cycles roles)"
           class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-xs font-medium cursor-pointer"
         >
-          <span>Role: <span class="text-[#3574f0]">{{ project.role }}</span></span>
+          <span>Model: <span class="text-[#3574f0]">{{ project.role }}</span></span>
           <ChevronDown class="w-3 h-3 text-[#6f737a]" />
         </button>
 
@@ -118,9 +171,50 @@ async function selectRole(roleName: string) {
                 <Check v-if="r.name === project.role" class="w-3.5 h-3.5 text-[#3574f0] shrink-0 ml-1" />
               </button>
             </template>
+            <div class="border-t border-[#393b40] my-1"></div>
+            <button
+              type="button"
+              @click="selectCustom"
+              class="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-[#2b2d30] cursor-pointer text-[#dfe1e5] transition-colors"
+            >
+              <div class="flex flex-col truncate">
+                <span :class="['font-medium', isCustom ? 'text-[#3574f0]' : '']">custom</span>
+                <span class="text-[12px] text-[#6f737a] truncate">Pick any model</span>
+              </div>
+              <Check v-if="isCustom" class="w-3.5 h-3.5 text-[#3574f0] shrink-0 ml-1" />
+            </button>
           </div>
         </template>
       </div>
+
+      <!-- Custom model picker -->
+      <select
+        v-if="isCustom"
+        :value="project.modelKey"
+        @change="onModelChange"
+        title="Model"
+        class="max-w-64 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer outline-none"
+      >
+        <option v-if="!modelListed" :value="project.modelKey">{{ project.modelKey || 'loading…' }}</option>
+        <optgroup v-for="[provider, list] in modelGroups" :key="provider" :label="provider">
+          <option v-for="m in list" :key="m.id" :value="`${m.provider}/${m.id}`">{{ m.name || m.id }}</option>
+        </optgroup>
+      </select>
+
+      <!-- Thinking level (any role) -->
+      <label
+        title="Thinking level (Shift+Tab in the prompt cycles levels)"
+        class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer"
+      >
+        <Brain class="w-3.5 h-3.5 text-[#6f737a]" />
+        <select
+          :value="project.thinking"
+          @change="onThinkingChange"
+          class="bg-[#1e1f22] text-[#3574f0] outline-none cursor-pointer"
+        >
+          <option v-for="l in thinkingOptions" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
 
       <!-- [🛡 Advisor] toggle button -->
       <button
@@ -148,9 +242,66 @@ async function selectRole(roleName: string) {
         <Sparkles class="w-3.5 h-3.5 text-[#e2a53b]" />
         <span>Review</span>
       </button>
+
+      <!-- Caveman level -->
+      <label
+        title="Caveman terse replies (/caveman)"
+        class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer"
+      >
+        <span class="text-[#bcbec4]">Caveman</span>
+        <select
+          :value="project.caveman"
+          @change="store.setAddonMode(project.id, 'caveman', ($event.target as HTMLSelectElement).value)"
+          class="bg-[#1e1f22] text-[#3574f0] outline-none cursor-pointer"
+        >
+          <option v-for="l in CAVEMAN_LEVELS" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
+
+      <!-- [RTK] toggle button -->
+      <button
+        type="button"
+        @click="store.setAddonMode(project.id, 'rtk', project.rtk ? 'off' : 'on')"
+        title="RTK compact shell output (/rtk on|off)"
+        :class="[
+          'flex items-center gap-1 px-2 py-1 rounded border transition-colors text-xs font-medium cursor-pointer',
+          project.rtk
+            ? 'bg-[#59a869]/20 text-[#59a869] border-[#59a869]'
+            : 'bg-[#1e1f22] text-[#bcbec4] border-[#393b40] hover:bg-[#2b2d30] hover:text-[#dfe1e5]'
+        ]"
+      >
+        <Terminal class="w-3.5 h-3.5" />
+        <span>RTK</span>
+      </button>
+
+      <!-- Ponytail level -->
+      <label
+        title="Ponytail minimal-code mode (/ponytail)"
+        class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer"
+      >
+        <span class="text-[#bcbec4]">Ponytail</span>
+        <select
+          :value="project.ponytail"
+          @change="store.setAddonMode(project.id, 'ponytail', ($event.target as HTMLSelectElement).value)"
+          class="bg-[#1e1f22] text-[#3574f0] outline-none cursor-pointer"
+        >
+          <option v-for="l in PONYTAIL_LEVELS" :key="l" :value="l">{{ l }}</option>
+        </select>
+      </label>
     </div>
 
     <div class="flex items-center gap-1.5">
+      <!-- [▣ Phone] omp collab QR -->
+      <button
+        type="button"
+        @click="collabOpen = true"
+        title="Control this session from your phone (omp collab QR code)"
+        class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#bcbec4] hover:bg-[#2b2d30] hover:text-[#dfe1e5] transition-colors text-xs font-medium cursor-pointer"
+      >
+        <QrCode class="w-3.5 h-3.5" />
+        <span>Phone</span>
+      </button>
+
       <!-- [⟲ New] button -->
       <button
         type="button"
@@ -180,5 +331,7 @@ async function selectRole(roleName: string) {
         <span>Stop</span>
       </button>
     </div>
+
+    <CollabModal :open="collabOpen" :project-id="project.id" @close="collabOpen = false" />
   </div>
 </template>

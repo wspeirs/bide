@@ -23,6 +23,17 @@ function handleKeyDown(e: KeyboardEvent) {
     store.abortPrompt(props.project.id);
     return;
   }
+  // omp parity: Ctrl+P cycles role, Shift+Tab cycles thinking level.
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+    e.preventDefault();
+    store.cycleRole(props.project.id);
+    return;
+  }
+  if (e.shiftKey && e.key === 'Tab') {
+    e.preventDefault();
+    store.cycleThinking(props.project.id);
+    return;
+  }
 }
 
 async function send(behavior?: string) {

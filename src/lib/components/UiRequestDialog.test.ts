@@ -4,6 +4,7 @@ import { createTestingPinia } from '@pinia/testing';
 import UiRequestDialog from './UiRequestDialog.vue';
 import { useProjectsStore } from '../stores/projects';
 import type { ProjectState } from '../types';
+import { invoke } from '@tauri-apps/api/core';
 
 vi.mock('@tauri-apps/api/core', () => {
   return {
@@ -32,10 +33,16 @@ describe('UiRequestDialog', () => {
       orchestrate: false,
       role: 'default',
       advisor: false,
-      lastPrompt: null,
+      history: [],
+      subagents: [],
+      caveman: 'off',
+      ponytail: 'off',
+      rtk: false,
       activityLog: [],
       isStreaming: false,
       model: 'test-model',
+      modelKey: 'test/test-model',
+      thinking: 'off',
       contextPercent: 0,
       pendingUiRequest,
       gitStatus: null,
@@ -314,5 +321,44 @@ describe('UiRequestDialog', () => {
     expect(btnAAfter.text()).toContain('○ A');
     const customAfter = wrapper.find<HTMLInputElement>('input[placeholder="Other (type your own)…"]');
     expect(customAfter.element.value).toBe('');
+  });
+
+  // 6. select with multi metadata renders checked/unchecked state and Done selecting sends original option value.
+  it('select with multi metadata renders checked/unchecked state and Done selecting sends original option value', async () => {
+    const project = makeProject({
+      id: 'req-6',
+      method: 'select',
+      options: ['A', 'B', '\uf00c Done selecting'],
+      multi: { checked: ['B'], count: 1, uncertain: false },
+    });
+
+    const wrapper = mount(UiRequestDialog, {
+      props: { project },
+      global: {
+        plugins: [createTestingPinia({ createSpy: vi.fn, stubActions: false })],
+      },
+    });
+
+    const store = useProjectsStore();
+    store.projects = [project];
+    vi.mocked(invoke).mockClear();
+
+    const text = wrapper.text();
+    expect(text).toContain('Selected: B');
+    expect(text).toContain('☑ B');
+    expect(text).toContain('☐ A');
+
+    const doneBtn = wrapper.findAll('button[type="button"]').find((b) => b.text().trim() === 'Done selecting');
+    expect(doneBtn).toBeDefined();
+    await doneBtn!.trigger('click');
+
+    expect(invoke).toHaveBeenCalledWith('omp_ui_respond', {
+      id: 'proj-1',
+      response: {
+        type: 'extension_ui_response',
+        id: 'req-6',
+        value: '\uf00c Done selecting',
+      },
+    });
   });
 });
