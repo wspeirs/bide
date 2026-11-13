@@ -569,5 +569,64 @@ describe('useProjectsStore', () => {
       expect(project.activityLog[0].phase).toBe('done');
       expect(project.activityLog[0].output).toBe('hi\ndone\n');
     });
+
+    it('extracts background job progress from partialResult.details.jobs when content is empty', () => {
+      const store = useProjectsStore();
+      const project = createTestProject();
+      store.projects.push(project);
+
+      store.handleFrame('proj-1', {
+        type: 'tool_execution_start',
+        toolCallId: 'call-wait',
+        toolName: 'wait',
+        args: { ids: ['bg_18'] },
+        intent: 'Waiting up to 5m for bg_18',
+      });
+
+      store.handleFrame('proj-1', {
+        type: 'tool_execution_update',
+        toolCallId: 'call-wait',
+        partialResult: {
+          content: [{ type: 'text', text: '' }],
+          details: {
+            op: 'wait',
+            jobs: [
+              {
+                id: 'bg_18',
+                type: 'bash',
+                status: 'running',
+                label: 'Schedule 13 backfill',
+                durationMs: 394_000,
+                stage: 'files copied',
+                widget: {
+                  state: 'live',
+                  title: 'Schedule 13 backfill',
+                  stage: 'files copied',
+                  blocks: [
+                    {
+                      kind: 'stat',
+                      items: [
+                        { label: 'files copied', text: '4083' },
+                        { label: 'files/s', text: '10' },
+                        { label: 'days this year', text: '249' },
+                      ],
+                    },
+                    { kind: 'text', text: '2023' },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      expect(project.activityLog[0].output).toBe(
+        [
+          'bg_18 (bash) · Schedule 13 backfill · files copied · running · 6m34s',
+          '  files copied 4083 · files/s 10 · days this year 249',
+          '  2023',
+        ].join('\n')
+      );
+    });
   });
 });

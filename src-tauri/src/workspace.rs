@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use serde::Serialize;
 
@@ -147,6 +148,102 @@ pub async fn read_global() -> Option<String> {
     }
 
     None
+}
+
+pub fn env_store_path(store_dir: &Path, key: &str) -> PathBuf {
+    store_dir.join(format!(
+        "{}.env.json",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes())
+    ))
+}
+
+pub fn read_env_from_store(store_dir: &Path, key: &str) -> Result<BTreeMap<String, String>, String> {
+    let path = env_store_path(store_dir, key);
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read workspace env file: {e}"))?;
+    if content.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_str::<BTreeMap<String, String>>(&content)
+        .map_err(|e| format!("Failed to parse workspace env file: {e}"))
+}
+
+pub fn write_env_to_store(
+    store_dir: &Path,
+    key: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut normalized = BTreeMap::new();
+    for (k, v) in env {
+        let name = k.trim();
+        if name.is_empty() {
+            return Err("Environment variable name cannot be empty".to_string());
+        }
+        if name.contains('=') || name.contains('\0') || name.chars().any(|c| c.is_whitespace()) {
+            return Err(format!(
+                "Invalid environment variable name '{name}': must not contain '=', whitespace, or null bytes"
+            ));
+        }
+        // A user PATH would change where `omp` itself is looked up and can make every session unspawnable.
+        if name.eq_ignore_ascii_case("PATH") {
+            return Err("PATH cannot be set per repository".to_string());
+        }
+        if v.contains('\0') {
+            return Err(format!("Value of '{name}' must not contain null bytes"));
+        }
+        if normalized.insert(name.to_string(), v.clone()).is_some() {
+            return Err(format!("Duplicate environment variable '{name}'"));
+        }
+    }
+
+    let path = env_store_path(store_dir, key);
+    if normalized.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Failed to remove empty workspace env file: {e}"))?;
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(store_dir)
+        .map_err(|e| format!("Failed to create store directory: {e}"))?;
+    let json = serde_json::to_string_pretty(&normalized)
+        .map_err(|e| format!("Failed to serialize workspace env: {e}"))?;
+    write_private(&path, format!("{json}\n").as_bytes())
+        .map_err(|e| format!("Failed to write workspace env file: {e}"))
+}
+
+/// Writes via a 0600 temp file + rename: secrets are never world-readable and a crash never leaves a partial file.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)
+}
+
+pub async fn read_env(dir: &Path) -> BTreeMap<String, String> {
+    let (key, _) = repo_key(dir).await;
+    match read_env_from_store(&store_dir(), &key) {
+        Ok(map) => map,
+        Err(e) => {
+            eprintln!("bide: {e}");
+            BTreeMap::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -407,5 +504,58 @@ mod tests {
         if let Some(parent) = wt_p.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    #[test]
+    fn test_env_store_roundtrip_and_validation() {
+        let tmp = tempdir().unwrap();
+        let store_dir = tmp.path().join("workspaces");
+        let key = "/tmp/some-repo/.git";
+
+        // Empty when file does not exist
+        assert!(read_env_from_store(&store_dir, key).unwrap().is_empty());
+
+        // Write and read back
+        let mut env = BTreeMap::new();
+        env.insert("GEMINI_API_KEY".to_string(), "secret-1".to_string());
+        env.insert("OPENROUTER_API_KEY".to_string(), "secret-2".to_string());
+        write_env_to_store(&store_dir, key, &env).unwrap();
+
+        let path = env_store_path(&store_dir, key);
+        assert!(path.exists());
+        assert_eq!(read_env_from_store(&store_dir, key).unwrap(), env);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // Writing empty map removes file
+        write_env_to_store(&store_dir, key, &BTreeMap::new()).unwrap();
+        assert!(!path.exists());
+        assert!(read_env_from_store(&store_dir, key).unwrap().is_empty());
+
+        // Validation errors
+        let mut bad_empty = BTreeMap::new();
+        bad_empty.insert("  ".to_string(), "val".to_string());
+        assert!(write_env_to_store(&store_dir, key, &bad_empty).is_err());
+
+        let mut bad_eq = BTreeMap::new();
+        bad_eq.insert("FOO=BAR".to_string(), "val".to_string());
+        assert!(write_env_to_store(&store_dir, key, &bad_eq).is_err());
+
+        let mut bad_space = BTreeMap::new();
+        bad_space.insert("FOO BAR".to_string(), "val".to_string());
+        assert!(write_env_to_store(&store_dir, key, &bad_space).is_err());
+
+        for name in ["PATH", "Path"] {
+            let bad_path = BTreeMap::from([(name.to_string(), "/x".to_string())]);
+            assert!(write_env_to_store(&store_dir, key, &bad_path).is_err());
+        }
+
+        let bad_nul = BTreeMap::from([("FOO".to_string(), "a\0b".to_string())]);
+        assert!(write_env_to_store(&store_dir, key, &bad_nul).is_err());
+        assert!(!path.exists());
     }
 }

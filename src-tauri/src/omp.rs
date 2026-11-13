@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -261,6 +261,14 @@ pub struct OmpSession {
 
 impl OmpSession {
     pub async fn spawn(cwd: &Path, resume_file: Option<&Path>) -> Result<Arc<Self>, String> {
+        Self::spawn_with_env(cwd, resume_file, &BTreeMap::new()).await
+    }
+
+    pub async fn spawn_with_env(
+        cwd: &Path,
+        resume_file: Option<&Path>,
+        env_vars: &BTreeMap<String, String>,
+    ) -> Result<Arc<Self>, String> {
         let mut cmd = Command::new("omp");
         cmd.arg("--mode").arg("rpc-ui");
         if let Some(ext) = collab_extension_path() {
@@ -270,6 +278,9 @@ impl OmpSession {
             cmd.arg("--resume").arg(resume);
         }
         cmd.current_dir(cwd);
+        if !env_vars.is_empty() {
+            cmd.envs(env_vars);
+        }
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());

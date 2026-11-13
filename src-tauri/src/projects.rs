@@ -78,7 +78,8 @@ impl ProjectsState {
             Err(e) => eprintln!("workspace sync error: {e}"),
             Ok(None) => {}
         }
-        let session = OmpSession::spawn(&dir_path, None).await?;
+        let env_vars = crate::workspace::read_env(&dir_path).await;
+        let session = OmpSession::spawn_with_env(&dir_path, None, &env_vars).await?;
         let session_file = session.session_file();
         let id = uuid::Uuid::new_v4().to_string();
 
@@ -169,12 +170,13 @@ impl ProjectsState {
                 .filter(|sf| Path::new(sf).exists())
                 .map(Path::new);
 
+            let env_vars = crate::workspace::read_env(&dir_path).await;
             let session_res = match resume_path {
-                Some(rf) => match OmpSession::spawn(&dir_path, Some(rf)).await {
+                Some(rf) => match OmpSession::spawn_with_env(&dir_path, Some(rf), &env_vars).await {
                     Ok(s) => Ok(s),
-                    Err(_) => OmpSession::spawn(&dir_path, None).await,
+                    Err(_) => OmpSession::spawn_with_env(&dir_path, None, &env_vars).await,
                 },
-                None => OmpSession::spawn(&dir_path, None).await,
+                None => OmpSession::spawn_with_env(&dir_path, None, &env_vars).await,
             };
 
             let session = match session_res {
@@ -240,12 +242,13 @@ impl ProjectsState {
             .filter(|sf| Path::new(sf).exists())
             .map(Path::new);
 
+        let env_vars = crate::workspace::read_env(&existing.dir).await;
         let new_session = match resume_path {
-            Some(rf) => match OmpSession::spawn(&existing.dir, Some(rf)).await {
+            Some(rf) => match OmpSession::spawn_with_env(&existing.dir, Some(rf), &env_vars).await {
                 Ok(s) => s,
-                Err(_) => OmpSession::spawn(&existing.dir, None).await?,
+                Err(_) => OmpSession::spawn_with_env(&existing.dir, None, &env_vars).await?,
             },
-            None => OmpSession::spawn(&existing.dir, None).await?,
+            None => OmpSession::spawn_with_env(&existing.dir, None, &env_vars).await?,
         };
 
         {

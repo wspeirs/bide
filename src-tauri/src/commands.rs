@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tauri::State;
 
@@ -378,38 +378,71 @@ pub async fn workspace_config_get(
     }
 }
 
+/// Saves config.yml and/or the repo env, then restarts each tab of the repo once so it picks up both.
 #[tauri::command]
-pub async fn workspace_config_set(
+pub async fn workspace_save(
     state: State<'_, ProjectsState>,
     id: String,
-    text: String,
+    text: Option<String>,
+    env: Option<BTreeMap<String, String>>,
 ) -> Result<(), String> {
     let p = state.get_project(&id).await?;
     let (key, is_git) = workspace::repo_key(&p.dir).await;
-    if is_git && git::is_tracked(&p.dir, workspace::REL).await {
-        return Err(workspace::TRACKED_WARNING.to_string());
-    }
-    let text = workspace::normalize(&text)?;
+    let text = match text {
+        Some(t) => {
+            if is_git && git::is_tracked(&p.dir, workspace::REL).await {
+                return Err(workspace::TRACKED_WARNING.to_string());
+            }
+            Some(workspace::normalize(&t)?)
+        }
+        None => None,
+    };
     let store_dir = workspace::store_dir();
-    tokio::fs::create_dir_all(&store_dir)
-        .await
-        .map_err(|e| format!("Failed to create store directory: {e}"))?;
-    let s_path = workspace::store_path(&store_dir, &key);
-    tokio::fs::write(&s_path, text)
-        .await
-        .map_err(|e| format!("Failed to write store config: {e}"))?;
+    // Env is validated before anything is written, so a rejected env leaves config untouched too.
+    if let Some(env) = &env {
+        workspace::write_env_to_store(&store_dir, &key, env)?;
+    }
+    if let Some(text) = &text {
+        tokio::fs::create_dir_all(&store_dir)
+            .await
+            .map_err(|e| format!("Failed to create store directory: {e}"))?;
+        tokio::fs::write(workspace::store_path(&store_dir, &key), text)
+            .await
+            .map_err(|e| format!("Failed to write store config: {e}"))?;
+    }
 
     let projects: Vec<_> = state.projects.lock().await.values().cloned().collect();
+    let mut failed = Vec::new();
     for q in projects {
         let (q_key, _) = workspace::repo_key(&q.dir).await;
-        if q_key == key {
+        if q_key != key {
+            continue;
+        }
+        if text.is_some() {
             if let Err(e) = workspace::sync(&q.dir, &store_dir).await {
                 eprintln!("Failed to sync workspace config for tab {}: {e}", q.id);
             }
-            let _ = state.restart_when_settled(q).await;
+        }
+        let dir = q.dir.display().to_string();
+        if let Err(e) = state.restart_when_settled(q).await {
+            failed.push(format!("{dir}: {e}"));
         }
     }
-    Ok(())
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Saved, but failed to restart omp for {}", failed.join("; ")))
+    }
+}
+
+#[tauri::command]
+pub async fn workspace_env_get(
+    state: State<'_, ProjectsState>,
+    id: String,
+) -> Result<BTreeMap<String, String>, String> {
+    let p = state.get_project(&id).await?;
+    let (key, _) = workspace::repo_key(&p.dir).await;
+    workspace::read_env_from_store(&workspace::store_dir(), &key)
 }
 
 #[tauri::command]

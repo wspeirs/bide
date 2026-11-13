@@ -67,7 +67,7 @@ watch(
       log.length,
       last?.text?.length,
       last?.argsChars,
-      last?.output?.length,
+      last?.output,
       props.project.isStreaming,
       selected.value,
       view.value,
@@ -94,6 +94,13 @@ function formatToolArgs(args: unknown): string {
 
 function fmtChars(n: number): string {
   return n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`;
+}
+
+function liveOutputTail(output: string, maxLines = 12): string {
+  const lines = output.replace(/\r\n/g, '\n').split('\n');
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  if (lines.length <= maxLines) return lines.join('\n');
+  return `… (${lines.length - maxLines} earlier lines)\n` + lines.slice(-maxLines).join('\n');
 }
 </script>
 
@@ -225,6 +232,12 @@ function fmtChars(n: number): string {
               </span>
             </span>
           </button>
+          <div
+            v-if="item.phase === 'running' && !item.endedAt && item.output && !expandedTools[item.id]"
+            class="px-2.5 py-1.5 border-t border-[#2b2d30] bg-[#1e1f22]/80 text-[#bcbec4] overflow-x-auto"
+          >
+            <pre class="m-0 font-mono text-[13px] whitespace-pre-wrap break-words text-[#bcbec4]">{{ liveOutputTail(item.output) }}</pre>
+          </div>
           <div
             v-if="expandedTools[item.id] && (item.intent || item.args || item.output)"
             class="p-2 border-t border-[#2b2d30] bg-[#1e1f22] text-[#bcbec4] overflow-x-auto space-y-2"

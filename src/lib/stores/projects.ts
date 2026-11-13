@@ -95,6 +95,142 @@ function closeOpenItems(log: ActivityItem[]) {
   }
 }
 
+function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h${m}m${s}s`;
+  if (m > 0) return `${m}m${s}s`;
+  return `${s}s`;
+}
+
+function formatWidgetBlocks(blocks: unknown[], stage?: string): string[] {
+  const lines: string[] = [];
+  for (const b of blocks) {
+    if (!b || typeof b !== 'object') continue;
+    const block = b as Record<string, unknown>;
+    if (block.kind === 'stat' && Array.isArray(block.items)) {
+      const stats = block.items
+        .map((it) => {
+          if (!it || typeof it !== 'object') return '';
+          const item = it as Record<string, unknown>;
+          const label = typeof item.label === 'string' ? item.label.trim() : '';
+          const text = typeof item.text === 'string' ? item.text.trim() : '';
+          const trend =
+            item.trend && typeof item.trend === 'object' && typeof (item.trend as Record<string, unknown>).text === 'string'
+              ? ` ${(item.trend as Record<string, unknown>).text}`
+              : '';
+          return [label, text].filter(Boolean).join(' ') + trend;
+        })
+        .filter(Boolean);
+      if (stats.length) lines.push(stats.join(' · '));
+    } else if (block.kind === 'text' && typeof block.text === 'string') {
+      const t = block.text.trim();
+      if (t && t !== stage) lines.push(t);
+    } else if (block.kind === 'bars' && Array.isArray(block.items)) {
+      for (const it of block.items) {
+        if (!it || typeof it !== 'object') continue;
+        const item = it as Record<string, unknown>;
+        const label = typeof item.label === 'string' ? item.label.trim() : '';
+        const text = typeof item.text === 'string' ? item.text.trim() : '';
+        const line = [label, text].filter(Boolean).join(': ');
+        if (line) lines.push(line);
+      }
+    } else if (block.kind === 'grid' && Array.isArray(block.items)) {
+      const items = block.items
+        .map((it) => (it && typeof it === 'object' && typeof (it as Record<string, unknown>).label === 'string' ? (it as Record<string, unknown>).label : ''))
+        .filter(Boolean);
+      if (items.length) lines.push(items.join(' · '));
+    }
+  }
+  return lines;
+}
+
+function formatJobProgress(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const j = raw as Record<string, unknown>;
+  const id = typeof j.id === 'string' ? j.id : '';
+  const type = typeof j.type === 'string' ? j.type : '';
+  const status = typeof j.status === 'string' ? j.status : '';
+  const widget = j.widget && typeof j.widget === 'object' ? (j.widget as Record<string, unknown>) : undefined;
+  const title =
+    (typeof widget?.title === 'string' && widget.title.trim()) ||
+    (typeof j.intent === 'string' && j.intent.trim()) ||
+    (typeof j.label === 'string' && j.label.split(/\r?\n/, 1)[0]?.trim()) ||
+    '';
+  const stage =
+    (typeof widget?.stage === 'string' && widget.stage.trim()) ||
+    (typeof j.stage === 'string' && j.stage.trim()) ||
+    '';
+  const pct = typeof j.completionPercent === 'number' && Number.isFinite(j.completionPercent) ? `${j.completionPercent}%` : '';
+  const dur = typeof j.durationMs === 'number' ? formatDurationMs(j.durationMs) : '';
+  const exit = typeof j.exitCode === 'number' && j.exitCode !== 0 ? `exit ${j.exitCode}` : '';
+
+  const headParts = [
+    id && type ? `${id} (${type})` : id || type,
+    title && title !== id ? title : '',
+    stage && stage !== title ? stage : '',
+    status,
+    pct,
+    exit,
+    dur,
+  ].filter(Boolean);
+
+  const lines: string[] = [];
+  if (headParts.length) lines.push(headParts.join(' · '));
+
+  if (widget && Array.isArray(widget.blocks)) {
+    for (const line of formatWidgetBlocks(widget.blocks, stage)) {
+      lines.push(`  ${line}`);
+    }
+  }
+
+  const body =
+    (typeof j.errorText === 'string' && j.errorText.trim()) ||
+    (typeof j.resultText === 'string' && j.resultText.trim()) ||
+    '';
+  if (body) {
+    for (const line of body.split(/\r?\n/)) {
+      if (line.trim()) lines.push(`  ${line}`);
+    }
+  }
+
+  return lines.length ? lines.join('\n') : undefined;
+}
+
+function extractDetailsOutput(details: unknown): string | undefined {
+  if (!details || typeof details !== 'object') return undefined;
+  const d = details as Record<string, unknown>;
+  const sections: string[] = [];
+
+  if (Array.isArray(d.jobs)) {
+    const jobLines = d.jobs.map(formatJobProgress).filter((s): s is string => Boolean(s));
+    if (jobLines.length) sections.push(jobLines.join('\n'));
+  }
+
+  if (Array.isArray(d.agents)) {
+    const agentLines = d.agents
+      .map((a) => {
+        if (!a || typeof a !== 'object') return undefined;
+        const ag = a as Record<string, unknown>;
+        const parts = [
+          typeof ag.id === 'string' ? ag.id : '',
+          typeof ag.agent === 'string' ? ag.agent : '',
+          typeof ag.activity === 'string' ? ag.activity : '',
+          typeof ag.status === 'string' ? ag.status : '',
+        ].filter(Boolean);
+        return parts.length ? parts.join(' · ') : undefined;
+      })
+      .filter((s): s is string => Boolean(s));
+    if (agentLines.length) sections.push(agentLines.join('\n'));
+  }
+
+  return sections.length ? sections.join('\n') : undefined;
+}
+
 function extractToolOutput(res: unknown): string | undefined {
   if (res == null) return undefined;
   if (typeof res === 'string') return res;
@@ -107,7 +243,12 @@ function extractToolOutput(res: unknown): string | undefined {
         return JSON.stringify(c);
       })
       .filter(Boolean);
-    return parts.length ? parts.join('\n') : undefined;
+    if (parts.length) return parts.join('\n');
+    if ('details' in res) {
+      const detailsOut = extractDetailsOutput((res as Record<string, unknown>).details);
+      if (detailsOut !== undefined) return detailsOut;
+    }
+    return undefined;
   }
   try {
     return JSON.stringify(res, null, 2);
@@ -1165,8 +1306,13 @@ export const useProjectsStore = defineStore('projects', () => {
     return await invoke<WorkspaceConfig>('workspace_config_get', { id });
   }
 
-  async function setWorkspaceConfig(id: string, text: string): Promise<void> {
-    await invoke('workspace_config_set', { id, text });
+  async function getWorkspaceEnv(id: string): Promise<Record<string, string>> {
+    return await invoke<Record<string, string>>('workspace_env_get', { id });
+  }
+
+  /** null = leave that part unchanged; the repo's sessions restart once. */
+  async function saveWorkspace(id: string, text: string | null, env: Record<string, string> | null): Promise<void> {
+    await invoke('workspace_save', { id, text, env });
   }
 
   function listDir(id: string, rel: string): Promise<{ name: string; is_dir: boolean }[]> {
@@ -1222,7 +1368,8 @@ export const useProjectsStore = defineStore('projects', () => {
     addWorktree,
     removeWorktree,
     getWorkspaceConfig,
-    setWorkspaceConfig,
+    getWorkspaceEnv,
+    saveWorkspace,
     listDir,
   };
 });

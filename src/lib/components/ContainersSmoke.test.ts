@@ -185,4 +185,32 @@ describe('Containers smoke tests', () => {
     expect(wrapper.text()).toContain('ingest-daily-metrics completed');
     wrapper.unmount();
   });
+
+  it('ActivityPane shows live output tail for running tools without expanding', async () => {
+    const pinia = createTestingPinia({ createSpy: vi.fn, stubActions: false });
+    const lines = Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join('\n');
+    const project = makeProject({
+      activityLog: [
+        {
+          id: 'tc-run',
+          type: 'tool_call',
+          tool: 'bash',
+          intent: 'Running backfill',
+          args: { command: 'backfill.sh' },
+          output: lines,
+          phase: 'running',
+        },
+      ],
+    });
+
+    const wrapper = mount(ActivityPane, {
+      props: { project },
+      global: { plugins: [pinia] },
+    });
+
+    expect(wrapper.text()).toContain('… (3 earlier lines)');
+    expect(wrapper.text()).toContain('line 15');
+    expect(wrapper.text()).not.toContain('line 1\n');
+    wrapper.unmount();
+  });
 });
