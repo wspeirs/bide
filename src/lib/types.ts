@@ -40,15 +40,26 @@ export interface GitStatus {
   untracked: string[];
 }
 
-export interface RoleInfo {
-  name: string;
-  selector: string;
-}
+export type ModelProfile = {
+  modelRoles: Record<string, string>;
+  defaultThinkingLevel?: string;
+  modelFallbacks?: Record<string, string>;
+};
+
+export type ModelProfileScope = 'global' | 'local';
+export type ModelProfileScopes = Record<ModelProfileScope, Record<string, ModelProfile>>;
 
 export interface ModelInfo {
   provider: string;
   id: string;
   name: string;
+  thinkingLevels?: string[];
+  kind?: string;
+}
+
+export interface ProfileModelOptions {
+  models: ModelInfo[];
+  roles: string[];
 }
 
 export interface UpdateReport {
@@ -96,7 +107,9 @@ export interface ProjectInfo {
   session_file?: string | null;
   orchestrate?: boolean;
   role?: string;
-  advisor?: boolean;
+  profile?: string | null;
+  advisorModelKey?: string | null;
+  advisorThinking?: string | null;
 }
 
 export interface PromptEntry {
@@ -124,7 +137,9 @@ export interface ProjectState {
   restartPending: boolean;
   orchestrate: boolean;
   role: string;
-  advisor: boolean;
+  profile?: string;
+  advisorModelKey?: string;
+  advisorThinking?: string;
   history: PromptEntry[];
   subagents: SubagentInfo[];
   caveman: string;
@@ -133,10 +148,13 @@ export interface ProjectState {
   activityLog: ActivityItem[];
   isStreaming: boolean;
   model: string;
+  advisorModel?: string;
+  advisorThinkingLevel?: string;
   /** `provider/modelId` of the live model ('' until known). */
   modelKey: string;
   thinking: string;
-  contextPercent: number;
+  contextPercent: number | null;
+  contextWindow?: number;
   pendingUiRequest: UiRequest | null;
   gitStatus: GitStatus | null;
   lastFetched: Date | null;

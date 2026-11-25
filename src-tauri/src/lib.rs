@@ -2,6 +2,7 @@ pub mod commands;
 pub mod git;
 pub mod omp;
 pub mod persist;
+pub mod profiles;
 pub mod projects;
 pub mod roles;
 pub mod update;
@@ -21,6 +22,8 @@ fn create_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Me
         Some("CmdOrCtrl+T"),
     )?;
     let close_tab = MenuItem::with_id(app, "close_tab", "Close Tab", true, Some("CmdOrCtrl+W"))?;
+    let model_profiles =
+        MenuItem::with_id(app, "model_profiles", "Model Profiles…", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let update_omp = MenuItem::with_id(app, "update_omp", "Update omp", true, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
@@ -29,7 +32,7 @@ fn create_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Me
         app,
         "File",
         true,
-        &[&new_tab, &close_tab, &sep1, &update_omp, &sep2, &quit],
+        &[&new_tab, &close_tab, &sep1, &model_profiles, &update_omp, &sep2, &quit],
     )?;
 
     // Edit menu
@@ -88,12 +91,15 @@ pub fn run() {
             commands::omp_ext_statuses,
             commands::omp_get_messages,
             commands::omp_ui_respond,
-            commands::omp_list_roles,
-            commands::omp_set_role,
+            commands::model_profiles_get,
+            commands::model_profile_options,
+            commands::model_profile_save,
+            commands::omp_set_profile,
             commands::omp_list_models,
             commands::omp_list_thinking_levels,
             commands::omp_set_model,
             commands::omp_set_thinking,
+            commands::omp_set_advisor,
             commands::omp_collab_link,
             commands::git_status,
             commands::git_stage,

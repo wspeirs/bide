@@ -23,13 +23,14 @@ function handleKeyDown(e: KeyboardEvent) {
     store.abortPrompt(props.project.id);
     return;
   }
-  // omp parity: Ctrl+P cycles role, Shift+Tab cycles thinking level.
+  // Ctrl+P cycles profiles; Shift+Tab adjusts thinking only in Custom.
   if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+    if (props.project.isStreaming || props.project.status === 'busy') return;
     e.preventDefault();
-    store.cycleRole(props.project.id);
+    store.cycleProfile(props.project.id);
     return;
   }
-  if (e.shiftKey && e.key === 'Tab') {
+  if (e.shiftKey && e.key === 'Tab' && props.project.profile === undefined) {
     e.preventDefault();
     store.cycleThinking(props.project.id);
     return;

@@ -6,8 +6,11 @@ import type {
   ProjectState,
   ProjectInfo,
   GitStatus,
-  RoleInfo,
+  ModelProfile,
+  ModelProfileScope,
+  ModelProfileScopes,
   ModelInfo,
+  ProfileModelOptions,
   ActivityItem,
   AskQuestion,
   Worktree,
@@ -405,6 +408,10 @@ function applyStatus(project: ProjectState, key: unknown, text: unknown) {
     project.rtk = /rtk:\s*on/i.test(plain);
   } else if (key === 'ponytail') {
     project.ponytail = plain.match(/ponytail:.*?([a-z]+)\s*$/i)?.[1].toLowerCase() ?? 'off';
+  } else if (key === 'bide-advisor-model') {
+    project.advisorModel = plain || undefined;
+  } else if (key === 'bide-advisor-thinking') {
+    project.advisorThinkingLevel = plain || undefined;
   }
 }
 
@@ -438,6 +445,9 @@ export const useProjectsStore = defineStore('projects', () => {
   const projects = ref<ProjectState[]>([]);
   const paneSizes = ref<PaneSizes>(parsePanes(read('bide_pane_sizes')) ?? { left: [20, 55, 25], git: 25 });
   const activeProjectId = ref<string | null>(read('bide_active_tab'));
+  const modelProfilesOpen = ref(false);
+  const profileRevision = ref(0);
+  const profileSwitching = ref(new Set<string>());
 
   watch(paneSizes, (v) => write('bide_pane_sizes', JSON.stringify(v)), { deep: true, flush: 'sync' });
   watch(activeProjectId, (id) => write('bide_active_tab', id), { flush: 'sync' });
@@ -498,7 +508,9 @@ export const useProjectsStore = defineStore('projects', () => {
           restartPending: false,
           orchestrate: info.orchestrate ?? false,
           role: info.role ?? 'default',
-          advisor: info.advisor ?? false,
+          profile: info.profile ?? undefined,
+          advisorModelKey: info.advisorModelKey ?? undefined,
+          advisorThinking: info.advisorThinking ?? undefined,
           history: [],
           subagents: [],
           caveman: 'off',
@@ -509,7 +521,7 @@ export const useProjectsStore = defineStore('projects', () => {
           model: 'loading…',
           modelKey: '',
           thinking: '',
-          contextPercent: 0,
+          contextPercent: null,
           pendingUiRequest: null,
           gitStatus: null,
           lastFetched: null,
@@ -519,18 +531,9 @@ export const useProjectsStore = defineStore('projects', () => {
         };
         projects.value.push(project);
         setupSubscription(project.id);
-        loadHistory(project.id);
       }
 
-      if (!activeProjectId.value && projects.value.length > 0) {
-        setActiveTab(projects.value[0].id);
-      } else if (activeProjectId.value && !projects.value.some((p) => p.id === activeProjectId.value)) {
-        if (projects.value.length > 0) {
-          setActiveTab(projects.value[0].id);
-        } else {
-          activeProjectId.value = null;
-        }
-      }
+      setActiveTab((activeProject.value ?? projects.value[0]).id);
     } catch (err) {
       console.error('Failed to restore projects:', err);
     }
@@ -567,7 +570,9 @@ export const useProjectsStore = defineStore('projects', () => {
         restartPending: false,
         orchestrate: info.orchestrate ?? false,
         role: info.role ?? 'default',
-        advisor: info.advisor ?? false,
+        profile: info.profile ?? undefined,
+        advisorModelKey: info.advisorModelKey ?? undefined,
+        advisorThinking: info.advisorThinking ?? undefined,
         history: [],
         subagents: [],
         caveman: 'off',
@@ -578,7 +583,7 @@ export const useProjectsStore = defineStore('projects', () => {
         model: 'loading…',
         modelKey: '',
         thinking: '',
-        contextPercent: 0,
+        contextPercent: null,
         pendingUiRequest: null,
         gitStatus: null,
         lastFetched: null,
@@ -590,7 +595,6 @@ export const useProjectsStore = defineStore('projects', () => {
       projects.value.push(project);
       setActiveTab(project.id);
       setupSubscription(project.id);
-      loadHistory(project.id);
       return project.id;
     } catch (err) {
       console.error('Failed to open project:', err);
@@ -636,7 +640,8 @@ export const useProjectsStore = defineStore('projects', () => {
     project.errorStderr = null;
 
     try {
-      await invoke<ProjectInfo>('project_restart', { id });
+      const info = await invoke<ProjectInfo>('project_restart', { id });
+      project.profile = info.profile ?? undefined;
       project.status = 'ready';
       refreshState(id);
       refreshGitStatus(id);
@@ -956,26 +961,67 @@ export const useProjectsStore = defineStore('projects', () => {
     project.orchestrate = value;
   }
 
-  async function listRoles(id: string): Promise<RoleInfo[]> {
+  function getModelProfiles(id?: string): Promise<ModelProfileScopes> {
+    return invoke('model_profiles_get', id === undefined ? {} : { id });
+  }
+
+  function getProfileModelOptions(id?: string): Promise<ProfileModelOptions> {
+    return invoke('model_profile_options', id === undefined ? {} : { id });
+  }
+
+  async function updateAppliedProfile(info: ProjectInfo): Promise<void> {
+    const project = projects.value.find((p) => p.id === info.id);
+    if (!project) return;
+    project.profile = info.profile ?? undefined;
+    await refreshState(info.id);
+  }
+
+  async function saveModelProfile(
+    id: string | undefined,
+    scope: ModelProfileScope,
+    name: string,
+    profile: ModelProfile | null,
+  ): Promise<string | null> {
+    const { updated, warning } = await invoke<{ updated: ProjectInfo[]; warning: string | null }>(
+      'model_profile_save', { ...(id === undefined ? {} : { id }), scope, name, profile },
+    );
+    profileRevision.value++;
+    await Promise.all(updated.map(updateAppliedProfile));
+    return warning;
+  }
+
+  function reportProfileError(id: string, action: string, err: unknown) {
+    console.error(`Failed to ${action}:`, err);
+    projects.value.find((p) => p.id === id)?.activityLog.push({
+      id: crypto.randomUUID(),
+      type: 'error',
+      text: `Failed to ${action}: ${err instanceof Error ? err.message : String(err)}`,
+      time: new Date().toLocaleTimeString(),
+      isError: true,
+    });
+  }
+
+  async function listProfileNames(id: string): Promise<string[] | undefined> {
     try {
-      return await invoke<RoleInfo[]>('omp_list_roles', { id });
+      const { global, local } = await getModelProfiles(id);
+      return Object.keys({ ...global, ...local }).sort((a, b) => a.localeCompare(b));
     } catch (err) {
-      console.error('Failed to list roles:', err);
-      return [];
+      reportProfileError(id, 'load model profiles', err);
     }
   }
 
-  async function setRole(id: string, role: string): Promise<void> {
+  async function setProfile(id: string, name: string | null): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
-    if (!project) return;
+    if (!project || project.isStreaming || project.status === 'busy' ||
+        project.profile === (name ?? undefined) || profileSwitching.value.has(id)) return;
 
+    profileSwitching.value.add(id);
     try {
-      await invoke('omp_set_role', { id, role });
-      project.role = role;
-      refreshState(id);
+      await updateAppliedProfile(await invoke<ProjectInfo>('omp_set_profile', { id, name }));
     } catch (err) {
-      console.error('Failed to set role:', err);
-      throw err;
+      reportProfileError(id, 'select model profile', err);
+    } finally {
+      profileSwitching.value.delete(id);
     }
   }
 
@@ -997,14 +1043,13 @@ export const useProjectsStore = defineStore('projects', () => {
     }
   }
 
-  /** `model` is `provider/modelId`; switches the tab to the custom role. */
-  async function setModel(id: string, model: string): Promise<void> {
+  /** `model` is `provider/modelId`; only the Custom profile allows manual selection. */
+  async function setModel(id: string, model: string, level: string | null = null): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
-    if (!project) return;
+    if (!project || project.profile !== undefined || profileSwitching.value.has(id)) return;
     try {
-      await invoke('omp_set_model', { id, model });
-      project.role = 'custom';
-      refreshState(id);
+      await invoke('omp_set_model', { id, model, level });
+      await refreshState(id);
     } catch (err) {
       console.error('Failed to set model:', err);
       throw err;
@@ -1013,49 +1058,44 @@ export const useProjectsStore = defineStore('projects', () => {
 
   async function setThinking(id: string, level: string): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
-    if (!project) return;
+    if (!project || project.profile !== undefined || profileSwitching.value.has(id)) return;
     try {
       await invoke('omp_set_thinking', { id, level });
       project.thinking = level;
-      refreshState(id);
+      await refreshState(id);
     } catch (err) {
       console.error('Failed to set thinking level:', err);
       throw err;
     }
   }
 
-  /** Ctrl+P: next role in list order (custom → first role). */
-  async function cycleRole(id: string): Promise<void> {
+  async function cycleProfile(id: string): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
-    const roles = await listRoles(id);
-    if (!project || roles.length === 0) return;
-    const idx = roles.findIndex((r) => r.name === project.role);
-    await setRole(id, roles[(idx + 1) % roles.length].name);
+    if (!project || project.isStreaming || project.status === 'busy' || profileSwitching.value.has(id)) return;
+    const current = project.profile;
+    const names = await listProfileNames(id);
+    if (!names?.length || project.profile !== current) return;
+    const options = [...names, null];
+    const idx = options.indexOf(current ?? null);
+    await setProfile(id, options[(idx + 1) % options.length]);
   }
 
   /** Shift+Tab: next thinking level the live model supports, wrapping to the first. */
   async function cycleThinking(id: string): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
+    if (!project || project.profile !== undefined || profileSwitching.value.has(id)) return;
     const levels = await listThinkingLevels(id);
-    if (!project || levels.length === 0) return;
+    if (levels.length === 0) return;
     const idx = levels.indexOf(project.thinking);
     await setThinking(id, levels[(idx + 1) % levels.length]);
   }
 
-  async function toggleAdvisor(id: string): Promise<void> {
+  async function setAdvisor(id: string, model: string | null, level: string | null = null): Promise<void> {
     const project = projects.value.find((p) => p.id === id);
-    if (!project) return;
-
-    const nextAdvisor = !project.advisor;
-    const slash = nextAdvisor ? '/advisor on' : '/advisor off';
-
-    try {
-      await invoke('omp_command', { id, slash });
-      project.advisor = nextAdvisor;
-    } catch (err) {
-      console.error('Failed to toggle advisor:', err);
-      throw err;
-    }
+    if (!project || project.profile !== undefined || profileSwitching.value.has(id)) return;
+    await invoke('omp_set_advisor', { id, model, level });
+    project.advisorModelKey = model ?? undefined;
+    project.advisorThinking = model ? level ?? undefined : undefined;
   }
 
   async function runReview(id: string): Promise<void> {
@@ -1121,16 +1161,15 @@ export const useProjectsStore = defineStore('projects', () => {
       } else if (typeof state.model === 'string') {
         project.model = state.model;
       }
-      if (typeof state.thinkingLevel === 'string') {
-        project.thinking = state.thinkingLevel;
-      }
+      project.thinking = typeof state.thinkingLevel === 'string' ? state.thinkingLevel : 'off';
 
-      if (state.contextUsage && typeof state.contextUsage === 'object') {
-        const cu = state.contextUsage as Record<string, unknown>;
-        if (typeof cu.percent === 'number') {
-          project.contextPercent = Math.round(cu.percent * 10) / 10;
-        }
-      }
+      const usage = state.contextUsage && typeof state.contextUsage === 'object'
+        ? state.contextUsage as Record<string, unknown>
+        : undefined;
+      const percent = usage?.percent;
+      const window = usage?.contextWindow;
+      project.contextPercent = typeof percent === 'number' && Number.isFinite(percent) ? percent : null;
+      project.contextWindow = typeof window === 'number' && Number.isFinite(window) && window > 0 ? window : undefined;
 
       if (typeof state.isStreaming === 'boolean') {
         project.isStreaming = state.isStreaming;
@@ -1142,29 +1181,6 @@ export const useProjectsStore = defineStore('projects', () => {
       for (const [k, v] of Object.entries(st ?? {})) applyStatus(project, k, v);
     } catch {
       // Ignore background state refresh errors
-    }
-  }
-
-  async function loadHistory(id: string): Promise<void> {
-    try {
-      const res = await invoke<unknown>('omp_get_messages', { id });
-      const msgs = Array.isArray(res) ? res : (res as Record<string, unknown> | null)?.messages;
-      if (!Array.isArray(msgs)) return;
-      const built: PromptEntry[] = [];
-      for (const raw of msgs) {
-        const m = raw as Record<string, unknown> | undefined;
-        const prompt = promptText(m);
-        if (prompt !== null) {
-          built.push({ id: crypto.randomUUID(), prompt, response: null });
-        } else if (m?.role === 'assistant' && built.length > 0) {
-          const txt = contentText(m.content).trim();
-          if (txt) built[built.length - 1].response = txt;
-        }
-      }
-      const project = projects.value.find((p) => p.id === id);
-      if (project) project.history = built;
-    } catch {
-      // Ignore background history load errors
     }
   }
 
@@ -1324,6 +1340,9 @@ export const useProjectsStore = defineStore('projects', () => {
     activeProjectId,
     paneSizes,
     activeProject,
+    modelProfilesOpen,
+    profileRevision,
+    profileSwitching,
     savePaneSizes,
     setActiveTab,
     startGitPolling,
@@ -1338,20 +1357,22 @@ export const useProjectsStore = defineStore('projects', () => {
     abortPrompt,
     newSession,
     setOrchestrate,
-    listRoles,
-    setRole,
+    getModelProfiles,
+    getProfileModelOptions,
+    saveModelProfile,
+    listProfileNames,
+    setProfile,
     listModels,
     listThinkingLevels,
     setModel,
     setThinking,
-    cycleRole,
+    cycleProfile,
     cycleThinking,
-    toggleAdvisor,
+    setAdvisor,
     runReview,
     collabLink,
     respondUi,
     refreshState,
-    loadHistory,
     setAddonMode,
     refreshGitStatus,
     gitStage,

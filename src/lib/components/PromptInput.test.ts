@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils';
 import { createTestingPinia } from '@pinia/testing';
 import { nextTick } from 'vue';
 import PromptInput from './PromptInput.vue';
+import { useProjectsStore } from '../stores/projects';
 import type { ProjectState } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => {
@@ -31,7 +32,6 @@ function createTestProject(id = 'proj-1'): ProjectState {
     restartPending: false,
     orchestrate: false,
     role: 'default',
-    advisor: false,
     history: [],
     subagents: [],
     caveman: 'off',
@@ -78,6 +78,30 @@ describe('PromptInput', () => {
     await nextTick();
     expect(document.activeElement).toBe(textarea);
 
+    wrapper.unmount();
+  });
+
+  it('cycles profiles with Ctrl+P and changes thinking only in Custom', async () => {
+    const pinia = createTestingPinia({ createSpy: vi.fn });
+    const store = useProjectsStore(pinia);
+    const project = createTestProject();
+    const wrapper = mount(PromptInput, { props: { project }, global: { plugins: [pinia] } });
+    const textarea = wrapper.get('textarea');
+
+    await textarea.trigger('keydown', { key: 'p', ctrlKey: true });
+    await textarea.trigger('keydown', { key: 'Tab', shiftKey: true });
+    expect(store.cycleProfile).toHaveBeenCalledWith(project.id);
+    expect(store.cycleThinking).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ project: { ...project, profile: 'Work' } });
+    const shiftTab = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, cancelable: true });
+    textarea.element.dispatchEvent(shiftTab);
+    expect(shiftTab.defaultPrevented).toBe(false);
+    expect(store.cycleThinking).toHaveBeenCalledTimes(1);
+
+    await wrapper.setProps({ project: { ...project, isStreaming: true } });
+    await textarea.trigger('keydown', { key: 'p', ctrlKey: true });
+    expect(store.cycleProfile).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 });

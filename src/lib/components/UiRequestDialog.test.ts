@@ -32,7 +32,6 @@ describe('UiRequestDialog', () => {
       restartPending: false,
       orchestrate: false,
       role: 'default',
-      advisor: false,
       history: [],
       subagents: [],
       caveman: 'off',

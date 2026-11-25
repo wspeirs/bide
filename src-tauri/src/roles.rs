@@ -1,24 +1,86 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
+use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::omp::OmpSession;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RoleInfo {
-    pub name: String,
-    pub selector: String,
-}
+use crate::profiles::ModelProfile;
 
 /// Trimmed `get_available_models` entry; the raw catalog is several MiB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub provider: String,
     pub id: String,
-    #[serde(default)]
     pub name: String,
+    pub thinking_levels: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileModelOptions {
+    roles: Vec<String>,
+    models: Vec<ProfileCatalogModel>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileCatalogModel {
+    provider: String,
+    id: String,
+    name: String,
+    kind: String,
+    #[serde(skip_serializing)]
+    reasoning: bool,
+    #[serde(rename(deserialize = "thinking"), default, deserialize_with = "deserialize_efforts")]
+    thinking_levels: Vec<String>,
+}
+
+fn deserialize_efforts<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+pub async fn profile_model_options(
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<ProfileModelOptions, String> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        models: Vec<ProfileCatalogModel>,
+    }
+
+    // The Custom RPC catalog is chat-only and needs an open session. The CLI also
+    // lists specialized models and can serve global profiles with no workspace.
+    // Use the same workspace environment as the running agent, including provider keys.
+    let catalog = Command::new("omp")
+        .args(["models", "ls", "--kind", "all", "--json"])
+        .current_dir(cwd)
+        .envs(env)
+        .output();
+    let mut config = Command::new("omp");
+    config.current_dir(cwd).envs(env);
+    let (output, configured) = tokio::join!(catalog, read_model_roles(&mut config));
+    let output = output.map_err(|e| format!("Failed to list omp models: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("Failed to list omp models: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    let Catalog { mut models } = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse omp model catalog: {e}"))?;
+    for model in &mut models {
+        if model.reasoning {
+            model.thinking_levels.insert(0, "off".to_owned());
+        }
+    }
+    // Built-in role IDs from omp's model browser, plus configured custom roles.
+    let mut roles: Vec<_> = [
+        "default", "advisor", "smol", "slow", "vision", "plan", "commit", "tiny",
+        "memory", "task", "widget", "image", "web", "speech", "dictation", "judge",
+    ].into_iter().map(str::to_owned).collect();
+    roles.extend(configured?.into_keys());
+    roles.sort_unstable();
+    roles.dedup();
+    Ok(ProfileModelOptions { roles, models })
 }
 
 /// `role` value marking a tab whose model was picked directly instead of via a role.
@@ -26,14 +88,6 @@ pub const CUSTOM_ROLE: &str = "custom";
 
 pub const VALID_THINKING_LEVELS: &[&str] = &[
     "off", "minimal", "low", "medium", "high", "xhigh", "max", "adaptive",
-];
-
-pub const HIDDEN_ROLES: &[&str] = &[
-    "image", "web", "speech", "dictation", "judge", "tiny", "memory",
-];
-
-pub const CHAT_ROLE_ORDER: &[&str] = &[
-    "default", "smol", "slow", "plan", "task", "commit", "vision", "advisor",
 ];
 
 /// Splits candidate by `/` into `(provider, rest)`.
@@ -96,38 +150,14 @@ pub fn resolve_role_alias(
     }
 }
 
-/// Filters out kind roles (`image`, `web`, `speech`, `dictation`, `judge`)
-/// and background roles (`tiny`, `memory`).
-/// Returns list of chat roles (e.g. `default`, `smol`, `slow`, `plan`, `task`, `commit`, `vision`, `advisor` and any custom role).
-pub fn get_chat_roles(model_roles: &HashMap<String, String>) -> Vec<RoleInfo> {
-    let mut roles: Vec<RoleInfo> = model_roles
-        .iter()
-        .filter(|(name, _)| !HIDDEN_ROLES.contains(&name.as_str()))
-        .map(|(name, selector)| RoleInfo {
-            name: name.clone(),
-            selector: selector.clone(),
-        })
-        .collect();
-
-    roles.sort_by(|a, b| {
-        let pos_a = CHAT_ROLE_ORDER.iter().position(|&r| r == a.name);
-        let pos_b = CHAT_ROLE_ORDER.iter().position(|&r| r == b.name);
-        match (pos_a, pos_b) {
-            (Some(ia), Some(ib)) => ia.cmp(&ib),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.name.cmp(&b.name),
-        }
-    });
-
-    roles
-}
-
 /// Runs `omp config get modelRoles --json` with `cwd` = project dir to get model roles map.
 pub async fn get_model_roles(cwd: &Path) -> Result<HashMap<String, String>, String> {
-    let output = Command::new("omp")
+    read_model_roles(Command::new("omp").current_dir(cwd)).await
+}
+
+async fn read_model_roles(command: &mut Command) -> Result<HashMap<String, String>, String> {
+    let output = command
         .args(["config", "get", "modelRoles", "--json"])
-        .current_dir(cwd)
         .output()
         .await
         .map_err(|e| format!("Failed to execute 'omp config get modelRoles --json': {e}"))?;
@@ -157,6 +187,79 @@ async fn send(session: &OmpSession, cmd: serde_json::Value) -> Result<serde_json
     }
 }
 
+pub async fn apply_profile(session: &OmpSession, profile: &ModelProfile) -> Result<(), String> {
+    send_runtime_settings(session, profile).await
+}
+
+pub(crate) async fn clear_profile(
+    session: &OmpSession,
+    advisor_model: Option<&str>,
+    advisor_thinking: Option<&str>,
+) -> Result<(), String> {
+    send_runtime_settings(
+        session,
+        serde_json::json!({
+            "clearProfile": true,
+            "advisorModel": advisor_model,
+            "advisorThinking": advisor_thinking,
+        }),
+    )
+    .await
+}
+
+pub(crate) async fn set_advisor(
+    session: &OmpSession,
+    model: Option<&str>,
+    level: Option<&str>,
+) -> Result<(), String> {
+    send_runtime_settings(
+        session,
+        serde_json::json!({ "advisorModel": model, "advisorThinking": level }),
+    )
+    .await
+}
+
+/// Omp has no role-mutation RPC. The Bide extension applies runtime-only settings and
+/// acknowledges this ticket over rpc-ui, without changing either omp config file.
+async fn send_runtime_settings(session: &OmpSession, payload: impl Serialize) -> Result<(), String> {
+    const COMMAND: &str = "bide-model-profile";
+    let available = send(session, serde_json::json!({ "type": "get_available_commands" })).await?;
+    if !available["commands"].as_array().is_some_and(|commands| {
+        commands.iter().any(|command| command["name"] == COMMAND && command["source"] == "extension")
+    }) {
+        return Err("The Bide model profile command is unavailable in this omp session".into());
+    }
+
+    let ticket = uuid::Uuid::new_v4();
+    let status_key = format!("{COMMAND}:{ticket}");
+    let encoded = BASE64_STANDARD.encode(serde_json::to_vec(&payload).map_err(|e| e.to_string())?);
+    let mut events = session.subscribe_broadcast();
+    session.command(&format!("/{COMMAND} {ticket} {encoded}")).await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match events.recv().await {
+                Ok(frame) if frame["statusKey"] == status_key => {
+                    let result: serde_json::Value = serde_json::from_str(
+                        frame["statusText"].as_str().ok_or("Missing model profile result")?,
+                    )
+                    .map_err(|e| format!("Invalid model profile result: {e}"))?;
+                    return match result["error"].as_str() {
+                        Some(error) => Err(error.to_owned()),
+                        None => Ok(()),
+                    };
+                }
+                Ok(frame) if frame["type"] == "process_exited" => {
+                    return Err("omp stopped before applying the model profile".into());
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return Err("omp closed before applying the model profile".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "omp did not confirm the model profile change".to_string())?
+}
+
 /// `model` is `provider/modelId`; the model id itself may contain `/`.
 pub async fn set_model(session: &OmpSession, model: &str) -> Result<serde_json::Value, String> {
     let (provider, model_id) = model
@@ -169,15 +272,72 @@ pub async fn set_thinking(session: &OmpSession, level: &str) -> Result<serde_jso
     send(session, serde_json::json!({ "type": "set_thinking_level", "level": level })).await
 }
 
-pub async fn list_models(session: &OmpSession) -> Result<Vec<ModelInfo>, String> {
+#[derive(Deserialize)]
+struct CatalogModel {
+    provider: String,
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    reasoning: bool,
+    thinking: Option<CatalogThinking>,
+}
+
+#[derive(Deserialize)]
+struct CatalogThinking {
+    #[serde(default)]
+    efforts: Vec<String>,
+}
+
+impl From<CatalogModel> for ModelInfo {
+    fn from(model: CatalogModel) -> Self {
+        let thinking_levels = if model.reasoning {
+            let mut efforts = model.thinking.map_or_else(Vec::new, |thinking| thinking.efforts);
+            efforts.insert(0, "off".to_owned());
+            efforts
+        } else {
+            Vec::new()
+        };
+        Self { provider: model.provider, id: model.id, name: model.name, thinking_levels }
+    }
+}
+
+async fn catalog_models(session: &OmpSession) -> Result<Vec<CatalogModel>, String> {
     #[derive(Deserialize)]
     struct Res {
-        models: Vec<ModelInfo>,
+        models: Vec<CatalogModel>,
     }
     let res = send(session, serde_json::json!({ "type": "get_available_models" })).await?;
     serde_json::from_value::<Res>(res)
         .map(|r| r.models)
         .map_err(|e| format!("Failed to parse available models: {e}"))
+}
+
+pub async fn list_models(session: &OmpSession) -> Result<Vec<ModelInfo>, String> {
+    Ok(catalog_models(session).await?.into_iter().map(ModelInfo::from).collect())
+}
+
+pub(crate) async fn validate_model_thinking(
+    session: &OmpSession,
+    model: &str,
+    level: &str,
+) -> Result<(), String> {
+    let (provider, id) = model
+        .split_once('/')
+        .ok_or_else(|| format!("Model must be 'provider/modelId', got '{model}'"))?;
+    let entry = catalog_models(session)
+        .await?
+        .into_iter()
+        .find(|entry| entry.provider == provider && entry.id == id)
+        .ok_or_else(|| format!("Model '{model}' is unavailable"))?;
+    let supported = entry.reasoning
+        && (level == "off" || entry.thinking.as_ref().is_some_and(|thinking| {
+            thinking.efforts.iter().any(|effort| effort == level)
+        }));
+    if !supported {
+        return Err(format!("Model '{model}' does not support thinking level '{level}'"));
+    }
+    Ok(())
 }
 
 pub async fn list_thinking_levels(session: &OmpSession) -> Result<Vec<String>, String> {
@@ -235,6 +395,8 @@ pub async fn apply_selection(
     role: &str,
     model: Option<&str>,
     thinking: Option<&str>,
+    advisor_model: Option<&str>,
+    advisor_thinking: Option<&str>,
 ) {
     match model {
         Some(m) if role == CUSTOM_ROLE => {
@@ -248,11 +410,31 @@ pub async fn apply_selection(
     if let Some(level) = thinking {
         let _ = set_thinking(session, level).await;
     }
+    if let Some(model) = advisor_model {
+        if let Err(e) = set_advisor(session, Some(model), advisor_thinking).await {
+            eprintln!("Failed to restore Custom advisor model {model:?}: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_catalog_exposes_only_supported_thinking_levels() {
+        for (reasoning, thinking, expected) in [
+            (true, serde_json::json!({ "efforts": ["low", "high"] }), vec!["off", "low", "high"]),
+            (true, serde_json::Value::Null, vec!["off"]),
+            (false, serde_json::json!({ "efforts": ["low"] }), vec![]),
+        ] {
+            let raw = serde_json::json!({
+                "provider": "test", "id": "model", "reasoning": reasoning, "thinking": thinking,
+            });
+            let model = ModelInfo::from(serde_json::from_value::<CatalogModel>(raw).unwrap());
+            assert_eq!(serde_json::to_value(model).unwrap()["thinkingLevels"], serde_json::json!(expected));
+        }
+    }
 
     #[test]
     fn test_parse_candidate_thinking_level_stripping_vs_model_tag() {
@@ -406,67 +588,5 @@ mod tests {
         assert!(resolve_role_alias(&roles, "nonexistent").is_err());
         let err = resolve_role_alias(&roles, "broken").unwrap_err();
         assert!(err.contains("Role not found"));
-    }
-
-    #[test]
-    fn test_get_chat_roles_filtering_and_order() {
-        let mut model_roles = HashMap::new();
-        // Chat roles
-        model_roles.insert("default".to_string(), "anthropic/claude-3-5:high".to_string());
-        model_roles.insert("smol".to_string(), "anthropic/claude-haiku".to_string());
-        model_roles.insert("slow".to_string(), "anthropic/claude-opus".to_string());
-        model_roles.insert("plan".to_string(), "@slow".to_string());
-        model_roles.insert("task".to_string(), "google/gemini".to_string());
-        model_roles.insert("commit".to_string(), "google/gemini".to_string());
-        model_roles.insert("vision".to_string(), "google/gemini-vision".to_string());
-        model_roles.insert("advisor".to_string(), "anthropic/claude".to_string());
-        model_roles.insert("custom_role".to_string(), "custom/model".to_string());
-
-        // Kind roles (should be filtered out)
-        model_roles.insert("image".to_string(), "openai/dall-e-3".to_string());
-        model_roles.insert("web".to_string(), "google/gemini".to_string());
-        model_roles.insert("speech".to_string(), "openai/tts".to_string());
-        model_roles.insert("dictation".to_string(), "openai/whisper".to_string());
-        model_roles.insert("judge".to_string(), "anthropic/claude".to_string());
-
-        // Background roles (should be filtered out)
-        model_roles.insert("tiny".to_string(), "anthropic/haiku".to_string());
-        model_roles.insert("memory".to_string(), "anthropic/haiku".to_string());
-
-        let chat_roles = get_chat_roles(&model_roles);
-
-        let names: Vec<String> = chat_roles.iter().map(|r| r.name.clone()).collect();
-
-        // Hidden roles must not be present
-        for hidden in HIDDEN_ROLES {
-            assert!(!names.contains(&hidden.to_string()), "Hidden role '{hidden}' should not be present");
-        }
-
-        // Chat roles must be present
-        for expected in &[
-            "default", "smol", "slow", "plan", "task", "commit", "vision", "advisor", "custom_role",
-        ] {
-            assert!(names.contains(&expected.to_string()), "Chat role '{expected}' should be present");
-        }
-
-        // Check preferred ordering
-        let expected_order = vec![
-            "default", "smol", "slow", "plan", "task", "commit", "vision", "advisor", "custom_role",
-        ];
-        assert_eq!(names, expected_order);
-    }
-
-    #[test]
-    fn test_role_info_serde() {
-        let info = RoleInfo {
-            name: "default".to_string(),
-            selector: "anthropic/claude-3-5:high".to_string(),
-        };
-        let json = serde_json::to_string(&info).unwrap();
-        assert!(json.contains("\"name\":\"default\""));
-        assert!(json.contains("\"selector\":\"anthropic/claude-3-5:high\""));
-
-        let deserialized: RoleInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, info);
     }
 }

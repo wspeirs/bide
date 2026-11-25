@@ -45,7 +45,6 @@ describe('useProjectsStore', () => {
       restartPending: false,
       orchestrate: false,
       role: 'default',
-      advisor: false,
       history: [],
       subagents: [],
       caveman: 'off',
@@ -64,6 +63,10 @@ describe('useProjectsStore', () => {
       debugLog: [],
       debugOpen: false,
     };
+  }
+
+  function mockInvoke(responses: Record<string, unknown>) {
+    vi.mocked(invoke).mockImplementation((cmd: string) => Promise.resolve(responses[cmd]));
   }
 
   describe('1. Store frame handling', () => {
@@ -434,6 +437,22 @@ describe('useProjectsStore', () => {
       expect(store.activeProjectId).toBe('proj-restored');
     });
 
+    it('shows the restored active tab’s current model and thinking', async () => {
+      localStorage.setItem('bide_active_tab', 'proj-restored');
+      mockInvoke({
+        projects_restore: [{ id: 'proj-restored', dir: '/test/dir', profile: null }],
+        omp_get_state: { model: { provider: 'openai', id: 'gpt-4.1', name: 'GPT-4.1' } },
+      });
+      const store = useProjectsStore();
+
+      await store.restoreProjects();
+
+      await vi.waitFor(() => {
+        expect(store.activeProject?.modelKey).toBe('openai/gpt-4.1');
+        expect(store.activeProject?.thinking).toBe('off');
+      });
+    });
+
     it('corrupt JSON in bide_pane_sizes falls back to defaults instead of throwing', () => {
       localStorage.setItem('bide_pane_sizes', '{ corrupt: json');
 
@@ -504,10 +523,6 @@ describe('useProjectsStore', () => {
   });
 
   describe('6. Ctrl+P / Shift+Tab cycling', () => {
-    function mockInvoke(responses: Record<string, unknown>) {
-      vi.mocked(invoke).mockImplementation((cmd: string) => Promise.resolve(responses[cmd]));
-    }
-
     it('cycleThinking advances and wraps from the last level to the first', async () => {
       const store = useProjectsStore();
       const project = createTestProject();
@@ -524,20 +539,80 @@ describe('useProjectsStore', () => {
       expect(project.thinking).toBe('off');
     });
 
-    it('cycleRole goes from custom to the first role and wraps past the last', async () => {
+    it('cycles sorted, distinct profile names with Custom last', async () => {
       const store = useProjectsStore();
       const project = createTestProject();
       store.projects.push(project);
-      mockInvoke({ omp_list_roles: [{ name: 'default', selector: 'a/b' }, { name: 'smol', selector: 'c/d' }] });
+      const profile = { modelRoles: { default: 'a/b' } };
+      vi.mocked(invoke).mockImplementation((cmd, args) => {
+        if (cmd === 'model_profiles_get') {
+          return Promise.resolve({ global: { Work: profile, Fast: profile }, local: { Fast: profile, Local: profile } });
+        }
+        if (cmd === 'omp_set_profile' && args && 'name' in args) {
+          return Promise.resolve({ id: project.id, profile: args.name });
+        }
+        return Promise.resolve(undefined);
+      });
 
-      project.role = 'custom';
-      await store.cycleRole('proj-1');
-      expect(project.role).toBe('default');
-      await store.cycleRole('proj-1');
-      expect(project.role).toBe('smol');
-      await store.cycleRole('proj-1');
-      expect(project.role).toBe('default');
+      for (const name of ['Fast', 'Local', 'Work', null]) {
+        await store.cycleProfile(project.id);
+        expect(invoke).toHaveBeenCalledWith('omp_set_profile', { id: project.id, name });
+        expect(project.profile).toBe(name ?? undefined);
+      }
     });
+
+    it('refreshes affected tabs and the picker revision after saving', async () => {
+      const store = useProjectsStore();
+      const changed = { ...createTestProject('changed'), profile: 'Work' };
+      const untouched = { ...createTestProject('untouched'), profile: 'Work' };
+      store.projects.push(changed, untouched);
+      mockInvoke({ model_profile_save: { updated: [{ id: changed.id, profile: null }], warning: null } });
+
+      await store.saveModelProfile(undefined, 'global', 'Work', null);
+
+      expect(store.profileRevision).toBe(1);
+      expect(changed.profile).toBeUndefined();
+      expect(untouched.profile).toBe('Work');
+      expect(invoke).toHaveBeenCalledWith('omp_get_state', { id: changed.id });
+      expect(invoke).not.toHaveBeenCalledWith('omp_get_state', { id: untouched.id });
+    });
+
+    it('keeps the current selection after a failed switch and allows another try', async () => {
+      const store = useProjectsStore();
+      const project = createTestProject();
+      store.projects.push(project);
+      vi.mocked(invoke).mockRejectedValueOnce('model unavailable');
+
+      await store.setProfile(project.id, 'Work');
+      expect(project.profile).toBeUndefined();
+      expect(project.activityLog.at(-1)?.text).toContain('model unavailable');
+
+      mockInvoke({ omp_set_profile: { id: project.id, profile: 'Work' } });
+      await store.setProfile(project.id, 'Work');
+      expect(project.profile).toBe('Work');
+    });
+  });
+
+  it('keeps the requested advisor effort separate from the live status and clears it when disabled', async () => {
+    const store = useProjectsStore();
+    const project = createTestProject();
+    store.projects.push(project);
+
+    const model = 'openrouter/vendor/model';
+    await store.setAdvisor(project.id, model, 'high');
+    expect(invoke).toHaveBeenLastCalledWith('omp_set_advisor', { id: project.id, model, level: 'high' });
+    expect(project.advisorModelKey).toBe(model);
+    expect(project.advisorThinking).toBe('high');
+
+    store.handleFrame(project.id, {
+      type: 'extension_ui_request', method: 'setStatus', statusKey: 'bide-advisor-thinking', statusText: 'medium',
+    });
+    expect(project.advisorThinkingLevel).toBe('medium');
+
+    await store.setAdvisor(project.id, null);
+    expect(invoke).toHaveBeenLastCalledWith('omp_set_advisor', { id: project.id, model: null, level: null });
+    expect(project.advisorModelKey).toBeUndefined();
+    expect(project.advisorThinking).toBeUndefined();
   });
 
   describe('7. Tool execution output', () => {

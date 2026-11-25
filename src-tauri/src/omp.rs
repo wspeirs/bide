@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, LazyLock, Mutex,
     },
     time::Duration,
 };
@@ -24,28 +24,30 @@ pub const STDERR_RING_BUFFER_CAPACITY: usize = 200;
 /// Bundled omp extension that hosts an omp Collab room for each RPC session (see omp-collab/build.ts).
 const COLLAB_EXTENSION: &str = include_str!("../../omp-collab/omp-collab.js");
 
-/// Writes the bundled collab extension where omp can load it. None (sessions run without
-/// collab) if it cannot be written; collab is optional, spawning must not fail over it.
-fn collab_extension_path() -> Option<&'static Path> {
-    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let path = dirs::cache_dir()?.join("bide").join("omp-collab.js");
-        let write = || -> std::io::Result<()> {
-            std::fs::create_dir_all(path.parent().expect("cache path has a parent"))?;
-            if std::fs::read(&path).ok().as_deref() != Some(COLLAB_EXTENSION.as_bytes()) {
-                std::fs::write(&path, COLLAB_EXTENSION)?;
-            }
-            Ok(())
-        };
-        match write() {
-            Ok(()) => Some(path),
-            Err(e) => {
-                eprintln!("bide: omp collab extension unavailable: {e}");
-                None
-            }
+static EXTENSIONS: LazyLock<[Option<PathBuf>; 2]> = LazyLock::new(|| {
+    [
+        cache_extension("omp-collab.js", COLLAB_EXTENSION),
+        cache_extension("omp-model-profiles.js", include_str!("../omp-model-profiles.js")),
+    ]
+});
+
+/// Materialize bundled extensions without blocking sessions that don't need them.
+fn cache_extension(filename: &str, source: &str) -> Option<PathBuf> {
+    let path = dirs::cache_dir()?.join("bide").join(filename);
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(path.parent().expect("cache path has a parent"))?;
+        if std::fs::read(&path).ok().as_deref() != Some(source.as_bytes()) {
+            std::fs::write(&path, source)?;
         }
-    })
-    .as_deref()
+        Ok(())
+    };
+    match write() {
+        Ok(()) => Some(path),
+        Err(e) => {
+            eprintln!("bide: omp extension {filename} unavailable: {e}");
+            None
+        }
+    }
 }
 
 pub type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
@@ -271,7 +273,7 @@ impl OmpSession {
     ) -> Result<Arc<Self>, String> {
         let mut cmd = Command::new("omp");
         cmd.arg("--mode").arg("rpc-ui");
-        if let Some(ext) = collab_extension_path() {
+        for ext in EXTENSIONS.iter().flatten() {
             cmd.arg("--extension").arg(ext);
         }
         if let Some(resume) = resume_file {
@@ -362,6 +364,13 @@ impl OmpSession {
                     Ok(Some(frame)) => {
                         if frame["type"] == "extension_ui_request" && frame["method"] == "setStatus"
                         {
+                            if frame["statusKey"]
+                                .as_str()
+                                .is_some_and(|key| key.starts_with("bide-model-profile:"))
+                            {
+                                let _ = broadcast_clone.send(frame);
+                                continue;
+                            }
                             if let Some(key) = frame["statusKey"].as_str() {
                                 ext_statuses_clone.lock().unwrap().insert(
                                     key.to_string(),

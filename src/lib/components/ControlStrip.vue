@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { useProjectsStore } from '../stores/projects';
-import type { ProjectState, RoleInfo, ModelInfo } from '../types';
-import { Users, Shield, RotateCcw, Square, Check, ChevronDown, Sparkles, QrCode, Brain, Terminal } from '@lucide/vue';
+import type { ProjectState, ModelInfo } from '../types';
+import { Users, RotateCcw, Square, Settings, Sparkles, QrCode, Terminal } from '@lucide/vue';
 import CollabModal from './CollabModal.vue';
+import ModelPicker from './ModelPicker.vue';
 
 const CAVEMAN_LEVELS = ['off', 'lite', 'full', 'ultra', 'wenyan'] as const;
 const PONYTAIL_LEVELS = ['off', 'lite', 'full', 'ultra'] as const;
+const MODEL_ROLES = ['Primary', 'Advisor'] as const;
+type ModelRole = typeof MODEL_ROLES[number];
 
 const props = defineProps<{
   project: ProjectState;
@@ -14,68 +17,93 @@ const props = defineProps<{
 
 const store = useProjectsStore();
 
-const roles = ref<RoleInfo[]>([]);
-const isRoleMenuOpen = ref(false);
-const menuPos = ref({ left: 0, bottom: 0 });
+const profileNames = ref<string[]>([]);
 const collabOpen = ref(false);
 const models = ref<ModelInfo[]>([]);
-const thinkingLevels = ref<string[]>([]);
-const isCustom = computed(() => props.project.role === 'custom');
+const openModelRole = ref<ModelRole | null>(null);
+const modelsLoading = ref(false);
+const modelSaving = ref(false);
+const modelError = ref('');
+const draftModel = ref<string | null>(null);
+const draftThinking = ref('');
+const isCustom = computed(() => props.project.profile === undefined);
+const modelRoles = computed(() => isCustom.value ? MODEL_ROLES : []);
+const isSwitching = computed(() => store.profileSwitching.has(props.project.id));
+const modelEditingDisabled = computed(() => isSwitching.value || modelSaving.value ||
+  props.project.isStreaming || props.project.status === 'busy');
+const draftModelInfo = computed(() =>
+  models.value.find((model) => `${model.provider}/${model.id}` === draftModel.value));
+const draftThinkingLevels = computed(() => draftModelInfo.value?.thinkingLevels ?? []);
+const selectedThinking = computed(() =>
+  draftThinkingLevels.value.includes(draftThinking.value) ? draftThinking.value : '');
+const cannotApply = computed(() => modelEditingDisabled.value ||
+  (draftModel.value === null ? openModelRole.value === 'Primary' : modelsLoading.value));
 
-const modelGroups = computed(() => {
-  const groups = new Map<string, ModelInfo[]>();
-  for (const m of models.value) {
-    if (!groups.has(m.provider)) groups.set(m.provider, []);
-    groups.get(m.provider)!.push(m);
+function modelKeyFor(role: ModelRole) {
+  return (role === 'Primary' ? props.project.modelKey : props.project.advisorModelKey) ?? null;
+}
+
+function thinkingFor(role: ModelRole) {
+  return (role === 'Primary' ? props.project.thinking : props.project.advisorThinking) ?? '';
+}
+
+function modelLabelFor(role: ModelRole) {
+  const key = modelKeyFor(role);
+  if (!key) return role === 'Advisor' ? 'Off' : 'Select model';
+  const name = role === 'Primary' ? props.project.model : props.project.advisorModel;
+  if (name) return `${name} · ${key.split('/')[0]}`;
+  return role === 'Advisor' ? `Unavailable (${key})` : key;
+}
+
+watch(
+  [() => props.project.id, () => store.profileRevision],
+  async ([id], previous, onCleanup) => {
+    if (id !== previous?.[0]) profileNames.value = [];
+    let stale = false;
+    onCleanup(() => { stale = true; });
+    const names = await store.listProfileNames(id);
+    if (!stale && names) profileNames.value = names;
+  },
+  { immediate: true },
+);
+
+watch(
+  [() => props.project.id, isCustom],
+  async ([id, custom], previous, onCleanup) => {
+    if (id !== previous?.[0]) models.value = [];
+    openModelRole.value = null;
+    modelsLoading.value = custom && models.value.length === 0;
+    if (!modelsLoading.value) return;
+    let stale = false;
+    onCleanup(() => { stale = true; });
+    const list = await store.listModels(id);
+    if (!stale) {
+      models.value = list;
+      modelsLoading.value = false;
+    }
+  },
+  { immediate: true },
+);
+
+watch(isSwitching, (switching) => {
+  if (switching) openModelRole.value = null;
+});
+
+function updateModelPicker(role: ModelRole, open: boolean) {
+  if (modelSaving.value) return;
+  if (open) {
+    if (!isCustom.value || modelEditingDisabled.value) return;
+    draftModel.value = modelKeyFor(role);
+    draftThinking.value = thinkingFor(role);
+    modelError.value = '';
+    openModelRole.value = role;
+  } else if (openModelRole.value === role) {
+    openModelRole.value = null;
   }
-  return groups;
-});
-// Keep the live values selectable while lists load or when discovery omits them.
-const modelListed = computed(() => models.value.some((m) => `${m.provider}/${m.id}` === props.project.modelKey));
-const thinkingOptions = computed(() => {
-  const t = props.project.thinking;
-  return !t || thinkingLevels.value.includes(t) ? thinkingLevels.value : [t, ...thinkingLevels.value];
-});
-
-// Supported levels depend on the live model.
-watch(
-  () => props.project.modelKey,
-  async (key) => {
-    if (key) thinkingLevels.value = await store.listThinkingLevels(props.project.id);
-  },
-  { immediate: true },
-);
-watch(
-  isCustom,
-  async (custom) => {
-    if (custom && models.value.length === 0) models.value = await store.listModels(props.project.id);
-  },
-  { immediate: true },
-);
-
-// Fixed position so the pane's overflow-hidden can't clip the menu.
-function toggleRoleMenu(e: MouseEvent) {
-  isRoleMenuOpen.value = !isRoleMenuOpen.value;
-  if (!isRoleMenuOpen.value) return;
-  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  menuPos.value = { left: r.left, bottom: window.innerHeight - r.top + 4 };
-  loadRoles();
 }
-
-async function loadRoles() {
-  roles.value = await store.listRoles(props.project.id);
-}
-
-onMounted(() => {
-  loadRoles();
-});
 
 function toggleOrchestrate() {
   store.setOrchestrate(props.project.id, !props.project.orchestrate);
-}
-
-function toggleAdvisor() {
-  store.toggleAdvisor(props.project.id);
 }
 
 function handleReview() {
@@ -91,23 +119,46 @@ function handleStop() {
   store.abortPrompt(props.project.id);
 }
 
-async function selectRole(roleName: string) {
-  isRoleMenuOpen.value = false;
-  await store.setRole(props.project.id, roleName);
+function onProfileChange(e: Event) {
+  const select = e.target as HTMLSelectElement;
+  const name = select.value || null;
+  select.value = props.project.profile ?? '';
+  store.setProfile(props.project.id, name);
 }
 
-// Pin the live model so the model picker starts from what is running now.
-async function selectCustom() {
-  isRoleMenuOpen.value = false;
-  if (!isCustom.value && props.project.modelKey) await store.setModel(props.project.id, props.project.modelKey);
+function stageModel(key: string | null) {
+  if (modelEditingDisabled.value || key === draftModel.value) return;
+  draftModel.value = key;
+  const role = openModelRole.value;
+  draftThinking.value = role && key === modelKeyFor(role) ? thinkingFor(role) : '';
+  modelError.value = '';
 }
 
-function onModelChange(e: Event) {
-  store.setModel(props.project.id, (e.target as HTMLSelectElement).value);
-}
-
-function onThinkingChange(e: Event) {
-  store.setThinking(props.project.id, (e.target as HTMLSelectElement).value);
+async function applyModel(role: ModelRole) {
+  if (!isCustom.value || cannotApply.value || openModelRole.value !== role) return;
+  const key = draftModel.value;
+  const level = selectedThinking.value || null;
+  const id = props.project.id;
+  modelError.value = '';
+  modelSaving.value = true;
+  try {
+    const sameModel = key === modelKeyFor(role);
+    if (role === 'Advisor') {
+      if (!sameModel || (key && ((level ?? '') !== thinkingFor(role) || !props.project.advisorModel))) {
+        await store.setAdvisor(id, key, level);
+      }
+    } else if (key !== null) {
+      if (!sameModel) await store.setModel(id, key, level);
+      else if (level && level !== thinkingFor(role)) await store.setThinking(id, level);
+    }
+    if (props.project.id === id) openModelRole.value = null;
+  } catch (err) {
+    if (props.project.id === id) {
+      modelError.value = `Failed to select model: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  } finally {
+    modelSaving.value = false;
+  }
 }
 </script>
 
@@ -118,7 +169,8 @@ function onThinkingChange(e: Event) {
       <button
         type="button"
         @click="toggleOrchestrate"
-        title="Toggle orchestrate prefix for multi-agent workflows"
+        :aria-pressed="Boolean(project.orchestrate)"
+        title="Use the primary model to orchestrate with omp’s configured subagent models"
         :class="[
           'flex items-center gap-1 px-2 py-1 rounded border transition-colors text-xs font-medium cursor-pointer',
           project.orchestrate
@@ -130,107 +182,59 @@ function onThinkingChange(e: Event) {
         <span>Orchestrate</span>
       </button>
 
-      <!-- [Model: <role> ▾] dropdown: roles + Custom -->
-      <div class="relative">
-        <button
-          type="button"
-          @click="toggleRoleMenu"
-          title="Select model role (Ctrl+P in the prompt cycles roles)"
-          class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] transition-colors text-xs font-medium cursor-pointer"
-        >
-          <span>Model: <span class="text-[#3574f0]">{{ project.role }}</span></span>
-          <ChevronDown class="w-3 h-3 text-[#6f737a]" />
-        </button>
-
-        <template v-if="isRoleMenuOpen">
-          <button
-            type="button"
-            class="fixed inset-0 z-40 cursor-default bg-transparent border-none p-0 outline-none"
-            @click="isRoleMenuOpen = false"
-            aria-label="Close menu"
-          ></button>
-          <div
-            :style="{ left: menuPos.left + 'px', bottom: menuPos.bottom + 'px' }"
-            class="fixed z-50 w-max min-w-52 max-w-[min(36rem,calc(100vw-1rem))] bg-[#1e1f22] border border-[#393b40] rounded shadow-xl py-1 max-h-60 overflow-y-auto font-sans text-xs"
-          >
-            <div v-if="roles.length === 0" class="px-3 py-1.5 text-[#6f737a] italic">
-              Loading roles…
-            </div>
-            <template v-else>
-              <button
-                v-for="r in roles"
-                :key="r.name"
-                type="button"
-                @click="selectRole(r.name)"
-                class="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-[#2b2d30] cursor-pointer text-[#dfe1e5] transition-colors"
-              >
-                <div class="flex flex-col truncate">
-                  <span :class="['font-medium', r.name === project.role ? 'text-[#3574f0]' : '']">{{ r.name }}</span>
-                  <span v-if="r.selector" class="text-[12px] text-[#6f737a] truncate">{{ r.selector }}</span>
-                </div>
-                <Check v-if="r.name === project.role" class="w-3.5 h-3.5 text-[#3574f0] shrink-0 ml-1" />
-              </button>
-            </template>
-            <div class="border-t border-[#393b40] my-1"></div>
-            <button
-              type="button"
-              @click="selectCustom"
-              class="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-[#2b2d30] cursor-pointer text-[#dfe1e5] transition-colors"
-            >
-              <div class="flex flex-col truncate">
-                <span :class="['font-medium', isCustom ? 'text-[#3574f0]' : '']">custom</span>
-                <span class="text-[12px] text-[#6f737a] truncate">Pick any model</span>
-              </div>
-              <Check v-if="isCustom" class="w-3.5 h-3.5 text-[#3574f0] shrink-0 ml-1" />
-            </button>
-          </div>
-        </template>
-      </div>
-
-      <!-- Custom model picker -->
       <select
-        v-if="isCustom"
-        :value="project.modelKey"
-        @change="onModelChange"
-        title="Model"
-        class="max-w-64 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer outline-none"
+        :value="project.profile ?? ''"
+        :disabled="modelEditingDisabled"
+        @change="onProfileChange"
+        aria-label="Model profile"
+        title="Model profile (Ctrl+P in the prompt cycles profiles)"
+        class="max-w-64 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer focus-visible:outline-[#3574f0] disabled:opacity-50 disabled:cursor-default"
       >
-        <option v-if="!modelListed" :value="project.modelKey">{{ project.modelKey || 'loading…' }}</option>
-        <optgroup v-for="[provider, list] in modelGroups" :key="provider" :label="provider">
-          <option v-for="m in list" :key="m.id" :value="`${m.provider}/${m.id}`">{{ m.name || m.id }}</option>
-        </optgroup>
+        <option v-if="project.profile !== undefined && !profileNames.includes(project.profile)" :value="project.profile">{{ project.profile }}</option>
+        <option v-for="name in profileNames" :key="name" :value="name">{{ name }}</option>
+        <option value="">Custom</option>
       </select>
-
-      <!-- Thinking level (any role) -->
-      <label
-        title="Thinking level (Shift+Tab in the prompt cycles levels)"
-        class="flex items-center gap-1 px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer"
-      >
-        <Brain class="w-3.5 h-3.5 text-[#6f737a]" />
-        <select
-          :value="project.thinking"
-          @change="onThinkingChange"
-          class="bg-[#1e1f22] text-[#3574f0] outline-none cursor-pointer"
-        >
-          <option v-for="l in thinkingOptions" :key="l" :value="l">{{ l }}</option>
-        </select>
-      </label>
-
-      <!-- [🛡 Advisor] toggle button -->
       <button
         type="button"
-        @click="toggleAdvisor"
-        title="Toggle advisor assistant (/advisor on/off)"
-        :class="[
-          'flex items-center gap-1 px-2 py-1 rounded border transition-colors text-xs font-medium cursor-pointer',
-          project.advisor
-            ? 'bg-[#59a869]/20 text-[#59a869] border-[#59a869]'
-            : 'bg-[#1e1f22] text-[#bcbec4] border-[#393b40] hover:bg-[#2b2d30] hover:text-[#dfe1e5]'
-        ]"
+        title="Model profile settings"
+        aria-label="Model profile settings"
+        @click="store.modelProfilesOpen = true"
+        class="flex items-center px-1.5 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#bcbec4] hover:bg-[#2b2d30] hover:text-[#dfe1e5] transition-colors cursor-pointer focus-visible:outline-[#3574f0]"
       >
-        <Shield class="w-3.5 h-3.5" />
-        <span>Advisor</span>
+        <Settings class="w-3.5 h-3.5" />
       </button>
+
+      <ModelPicker
+        v-for="role in modelRoles" :key="`${project.id}:${role}`"
+        :open="openModelRole === role" :title="`Select ${role.toLowerCase()} model`"
+        :models="models" :model="draftModel" :empty-label="role === 'Advisor' ? 'Off' : undefined"
+        :loading="modelsLoading" :disabled="modelEditingDisabled" :saving="modelSaving"
+        :error="modelError" :cannot-apply="cannotApply"
+        @update:open="updateModelPicker(role, $event)" @select="stageModel" @apply="applyModel(role)"
+      >
+        <template #trigger>
+          <button
+            type="button" :disabled="modelEditingDisabled" :title="`${role}: ${modelLabelFor(role)}`"
+            class="max-w-48 truncate px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] text-[#dfe1e5] hover:bg-[#2b2d30] text-xs font-medium cursor-pointer focus-visible:outline-[#3574f0] disabled:opacity-50"
+          >
+            {{ role }}: {{ modelLabelFor(role) }}
+          </button>
+        </template>
+        <template #thinking>
+          <label class="flex items-center gap-2">
+            Thinking level
+            <select
+              :value="selectedThinking"
+              :disabled="modelEditingDisabled || !draftThinkingLevels.length"
+              @change="draftThinking = ($event.target as HTMLSelectElement).value"
+              class="px-2 py-1 rounded border border-[#393b40] bg-[#1e1f22] focus-visible:outline-[#3574f0] disabled:opacity-50"
+            >
+              <option value="">{{ role === 'Primary' ? 'Keep current' : 'Default' }}</option>
+              <option v-for="level in draftThinkingLevels" :key="level" :value="level">{{ level }}</option>
+            </select>
+          </label>
+        </template>
+      </ModelPicker>
 
       <!-- [Review] button -->
       <button

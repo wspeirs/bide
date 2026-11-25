@@ -29,7 +29,6 @@ function createTestProject(id = 'proj-1'): ProjectState {
     restartPending: false,
     orchestrate: false,
     role: 'default',
-    advisor: false,
     history: [],
     subagents: [],
     caveman: 'off',

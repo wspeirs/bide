@@ -6,12 +6,15 @@ import TabBar from './lib/components/TabBar.vue';
 import ProjectView from './lib/components/ProjectView.vue';
 import UiRequestDialog from './lib/components/UiRequestDialog.vue';
 import UpdateModal from './lib/components/UpdateModal.vue';
+import ModelProfilesModal from './lib/components/ModelProfilesModal.vue';
 import { FolderOpen, Plus } from '@lucide/vue';
 
 const store = useProjectsStore();
 const updateModalOpen = ref(false);
 
 function handleKeyDown(e: KeyboardEvent) {
+  if (store.modelProfilesOpen || e.defaultPrevented) return;
+
   const isMod = e.ctrlKey || e.metaKey;
 
   // Ctrl+1 through Ctrl+9: switch to tab 1 through 9
@@ -50,6 +53,8 @@ onMounted(() => {
       store.closeActiveProject();
     } else if (menuId === 'update_omp') {
       updateModalOpen.value = true;
+    } else if (menuId === 'model_profiles') {
+      store.modelProfilesOpen = true;
     }
   }).then((fn) => {
     if (isUnmounted) {
@@ -138,5 +143,6 @@ onBeforeUnmount(() => {
 
     <!-- Update omp Modal -->
     <UpdateModal :open="updateModalOpen" @close="updateModalOpen = false" />
+    <ModelProfilesModal />
   </main>
 </template>

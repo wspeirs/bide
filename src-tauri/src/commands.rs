@@ -6,8 +6,9 @@ use tauri::State;
 use crate::{
     git::{self, Branches, GitStatus, Worktree},
     persist,
+    profiles::{self, ModelProfile, ModelProfileScope, ModelProfileScopes},
     projects::{ProjectInfo, ProjectsState},
-    roles::{self, ModelInfo, RoleInfo},
+    roles::{self, ModelInfo, ProfileModelOptions},
     update::{self, UpdateReport},
     workspace::{self, WorkspaceConfig},
 };
@@ -142,24 +143,117 @@ pub async fn omp_ui_respond(
 }
 
 #[tauri::command]
-pub async fn omp_list_roles(
+pub async fn model_profiles_get(
     state: State<'_, ProjectsState>,
-    id: String,
-) -> Result<Vec<RoleInfo>, String> {
-    let project = state.get_project(&id).await?;
-    let model_roles = roles::get_model_roles(&project.dir).await?;
-    Ok(roles::get_chat_roles(&model_roles))
+    id: Option<String>,
+) -> Result<ModelProfileScopes, String> {
+    let project = match id {
+        Some(id) => Some(state.get_project(&id).await?),
+        None => None,
+    };
+    profiles::get(project.as_ref().map(|p| p.dir.as_path())).await
 }
 
 #[tauri::command]
-pub async fn omp_set_role(
+pub async fn model_profile_options(
     state: State<'_, ProjectsState>,
-    id: String,
-    role: String,
-) -> Result<Value, String> {
-    state.set_role(&id, &role).await
+    id: Option<String>,
+) -> Result<ProfileModelOptions, String> {
+    if let Some(id) = id {
+        let project = state.get_project(&id).await?;
+        let env = workspace::read_env(&project.dir).await;
+        roles::profile_model_options(&project.dir, &env).await
+    } else {
+        roles::profile_model_options(std::path::Path::new("/"), &BTreeMap::new()).await
+    }
 }
 
+#[derive(serde::Serialize)]
+pub struct ModelProfileSaveResult {
+    updated: Vec<ProjectInfo>,
+    warning: Option<String>,
+}
+
+#[tauri::command]
+pub async fn model_profile_save(
+    state: State<'_, ProjectsState>,
+    id: Option<String>,
+    scope: ModelProfileScope,
+    name: String,
+    profile: Option<ModelProfile>,
+) -> Result<ModelProfileSaveResult, String> {
+    let _change = state.profile_changes.lock().await;
+    let project = match scope {
+        ModelProfileScope::Global => None,
+        ModelProfileScope::Local => {
+            let id = id.as_deref().ok_or("Local model profiles require a workspace")?;
+            Some(state.get_project(id).await?)
+        }
+    };
+    let dir = project.as_ref().map(|p| p.dir.as_path());
+    let local_key = match dir {
+        Some(dir) => Some(workspace::repo_key(dir).await.0),
+        None => None,
+    };
+    let selected: Vec<_> = state.projects.lock().await.values()
+        .filter(|p| p.profile.as_deref() == Some(name.as_str()))
+        .cloned()
+        .collect();
+    let mut affected = Vec::new();
+    for p in selected {
+        if let Some(key) = &local_key {
+            if &workspace::repo_key(&p.dir).await.0 != key {
+                continue;
+            }
+        }
+        let scopes = profiles::get(Some(&p.dir)).await?;
+        let next = match scope {
+            ModelProfileScope::Global => scopes.local.get(&name).or(profile.as_ref()),
+            ModelProfileScope::Local => profile.as_ref().or_else(|| scopes.global.get(&name)),
+        };
+        if next != scopes.resolve(&name) {
+            if !p.session.is_settled() {
+                return Err(format!("Wait for omp in {} to finish before editing its active profile", p.dir.display()));
+            }
+            affected.push((p, next.cloned()));
+        }
+    }
+    profiles::save(dir, scope, &name, profile).await?;
+
+    let mut updated = Vec::new();
+    let mut failures = Vec::new();
+    for (p, next) in affected {
+        let selection = next.as_ref().map(|profile| (name.as_str(), profile));
+        match state.apply_project_profile(&p, selection).await {
+            Ok(info) => updated.push(info),
+            Err(e) => failures.push(format!("{}: {e}", p.dir.display())),
+        }
+    }
+    let warning = (!failures.is_empty()).then(|| {
+        format!("Saved, but could not update the active profile in {}", failures.join("; "))
+    });
+    Ok(ModelProfileSaveResult { updated, warning })
+}
+
+#[tauri::command]
+pub async fn omp_set_profile(
+    state: State<'_, ProjectsState>,
+    id: String,
+    name: Option<String>,
+) -> Result<ProjectInfo, String> {
+    state.set_profile(&id, name.as_deref()).await
+}
+
+
+#[tauri::command]
+pub async fn omp_set_advisor(
+    state: State<'_, ProjectsState>,
+    id: String,
+    model: Option<String>,
+    level: Option<String>,
+) -> Result<(), String> {
+    state.set_advisor(&id, model, level).await
+}
 #[tauri::command]
 pub async fn omp_list_models(
     state: State<'_, ProjectsState>,
@@ -183,8 +277,9 @@ pub async fn omp_set_model(
     state: State<'_, ProjectsState>,
     id: String,
     model: String,
+    level: Option<String>,
 ) -> Result<Value, String> {
-    state.set_model(&id, &model).await
+    state.set_model(&id, &model, level.as_deref()).await
 }
 
 #[tauri::command]

@@ -167,26 +167,7 @@ async fn test_role_resolution_against_live_omp_config() {
         model_roles
     );
 
-    // 2. Filter to chat roles
-    let chat_roles = roles::get_chat_roles(&model_roles);
-    assert!(!chat_roles.is_empty(), "chat_roles should not be empty");
-
-    // Verify default role is in chat_roles
-    let default_role = chat_roles.iter().find(|r| r.name == "default");
-    assert!(default_role.is_some(), "chat_roles must include 'default'");
-    let default_role = default_role.unwrap();
-    assert!(!default_role.selector.is_empty(), "default role must specify a selector");
-
-    // Verify hidden/background roles are excluded
-    for hidden in roles::HIDDEN_ROLES {
-        assert!(
-            !chat_roles.iter().any(|r| r.name == *hidden),
-            "hidden role '{}' should not be in chat_roles",
-            hidden
-        );
-    }
-
-    // 3. Test resolve_role_alias
+    // Resolve aliases in legacy tab role selections.
     let resolved = roles::resolve_role_alias(&model_roles, "default")
         .expect("resolve_role_alias for 'default' failed");
     assert!(
@@ -194,7 +175,7 @@ async fn test_role_resolution_against_live_omp_config() {
         "resolved candidate string should not be empty"
     );
 
-    // 4. Test parse_candidate on the resolved string
+    // Parse the resolved model selector.
     let (provider, model_id, thinking_level) = roles::parse_candidate(&resolved);
     assert!(!provider.is_empty(), "provider should not be empty");
     assert!(!model_id.is_empty(), "model_id should not be empty");
@@ -205,6 +186,29 @@ async fn test_role_resolution_against_live_omp_config() {
             level
         );
     }
+}
+
+#[tokio::test]
+async fn profile_catalog_uses_workspace_openrouter_key() {
+    if !has_omp() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().to_string_lossy().into_owned();
+    let mut env = std::collections::BTreeMap::from([
+        ("HOME".into(), home.clone()),
+        ("PI_CODING_AGENT_DIR".into(), home),
+        ("OMP_PROFILE".into(), "default".into()),
+        ("OPENROUTER_API_KEY".into(), String::new()),
+    ]);
+    let has_openrouter = |catalog| {
+        let options = serde_json::to_value(catalog).unwrap();
+        options["models"].as_array().unwrap().iter().any(|model| model["provider"] == "openrouter")
+    };
+    assert!(!has_openrouter(roles::profile_model_options(dir.path(), &env).await.unwrap()));
+    env.insert("OPENROUTER_API_KEY".into(), "catalog-test-placeholder".into());
+    assert!(has_openrouter(roles::profile_model_options(dir.path(), &env).await.unwrap()));
 }
 
 #[tokio::test]
@@ -327,11 +331,6 @@ async fn test_phase4_full_smoke_multi_tab_workflow() {
     assert!(!tab1.id.is_empty());
     assert!(!tab2.id.is_empty());
     assert!(!tab3.id.is_empty());
-
-    // 3. Role listing on repository
-    let model_roles = roles::get_model_roles(root_path).await.expect("get_model_roles");
-    let chat_roles = roles::get_chat_roles(&model_roles);
-    assert!(!chat_roles.is_empty(), "Chat roles list should not be empty");
 
     // 4. Git status on repository
     let git_st = bide_lib::git::git_status(root_path).await.expect("git_status failed");

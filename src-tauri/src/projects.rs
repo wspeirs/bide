@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     omp::OmpSession,
     persist::{self, TabConfig},
+    profiles,
     roles,
 };
 
@@ -20,7 +21,9 @@ pub struct ProjectInfo {
     pub session_file: Option<String>,
     pub orchestrate: bool,
     pub role: String,
-    pub advisor: bool,
+    pub profile: Option<String>,
+    pub advisor_model_key: Option<String>,
+    pub advisor_thinking: Option<String>,
 }
 
 #[derive(Clone)]
@@ -31,7 +34,10 @@ pub struct Project {
     pub session_file: Option<String>,
     pub orchestrate: bool,
     pub role: String,
-    pub advisor: bool,
+    pub profile: Option<String>,
+    /// Saved Custom advisor choice, independent of the active model profile.
+    pub advisor_model_key: Option<String>,
+    pub advisor_thinking: Option<String>,
     /// `provider/modelId` when `role == roles::CUSTOM_ROLE`.
     pub model: Option<String>,
     /// Thinking level override on top of the role/model.
@@ -48,7 +54,9 @@ impl From<&Project> for ProjectInfo {
             session_file: p.session.session_file().or_else(|| p.session_file.clone()),
             orchestrate: p.orchestrate,
             role: p.role.clone(),
-            advisor: p.advisor,
+            profile: p.profile.clone(),
+            advisor_model_key: p.advisor_model_key.clone(),
+            advisor_thinking: p.advisor_thinking.clone(),
         }
     }
 }
@@ -62,12 +70,14 @@ impl From<Arc<Project>> for ProjectInfo {
 #[derive(Clone, Default)]
 pub struct ProjectsState {
     pub projects: Arc<tokio::sync::Mutex<HashMap<String, Arc<Project>>>>,
+    pub(crate) profile_changes: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ProjectsState {
     pub fn new() -> Self {
         Self {
             projects: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            profile_changes: Arc::default(),
         }
     }
 
@@ -90,7 +100,9 @@ impl ProjectsState {
             session_file: session_file.clone(),
             orchestrate: false,
             role: "default".to_string(),
-            advisor: false,
+            profile: None,
+            advisor_model_key: None,
+            advisor_thinking: None,
             model: None,
             thinking: None,
             restart_pending: Arc::new(AtomicBool::new(false)),
@@ -109,7 +121,9 @@ impl ProjectsState {
             session_file,
             orchestrate: false,
             role: "default".to_string(),
-            advisor: false,
+            profile: None,
+            advisor_model_key: None,
+            advisor_thinking: None,
             model: None,
             thinking: None,
         });
@@ -187,10 +201,21 @@ impl ProjectsState {
                 }
             };
 
-            roles::apply_selection(&session, &dir_path, &tab.role, tab.model.as_deref(), tab.thinking.as_deref()).await;
-
-            if tab.advisor {
-                let _ = session.command("/advisor on").await;
+            if let Err(e) = restore_profile(&session, &dir_path, tab.profile.as_deref()).await {
+                eprintln!("Failed to restore model profile for tab {}: {e}", tab.id);
+                tab.profile = None;
+            }
+            if tab.profile.is_none() {
+                roles::apply_selection(
+                    &session,
+                    &dir_path,
+                    &tab.role,
+                    tab.model.as_deref(),
+                    tab.thinking.as_deref(),
+                    tab.advisor_model_key.as_deref(),
+                    tab.advisor_thinking.as_deref(),
+                )
+                .await;
             }
 
             let session_file = session.session_file().or_else(|| tab.session_file.clone());
@@ -203,7 +228,9 @@ impl ProjectsState {
                 session_file,
                 orchestrate: tab.orchestrate,
                 role: tab.role.clone(),
-                advisor: tab.advisor,
+                profile: tab.profile.clone(),
+                advisor_model_key: tab.advisor_model_key.clone(),
+                advisor_thinking: tab.advisor_thinking.clone(),
                 model: tab.model.clone(),
                 thinking: tab.thinking.clone(),
                 restart_pending: Arc::new(AtomicBool::new(false)),
@@ -229,6 +256,7 @@ impl ProjectsState {
     }
 
     pub async fn restart(&self, id: &str) -> Result<ProjectInfo, String> {
+        let _change = self.profile_changes.lock().await;
         let existing = self.get_project(id).await?;
         let _ = existing.session.shutdown().await;
 
@@ -258,17 +286,22 @@ impl ProjectsState {
             }
         }
 
-        roles::apply_selection(
-            &new_session,
-            &existing.dir,
-            &existing.role,
-            existing.model.as_deref(),
-            existing.thinking.as_deref(),
-        )
-        .await;
-
-        if existing.advisor {
-            let _ = new_session.command("/advisor on").await;
+        let mut profile = existing.profile.clone();
+        if let Err(e) = restore_profile(&new_session, &existing.dir, profile.as_deref()).await {
+            eprintln!("Failed to restore model profile for tab {id}: {e}");
+            profile = None;
+        }
+        if profile.is_none() {
+            roles::apply_selection(
+                &new_session,
+                &existing.dir,
+                &existing.role,
+                existing.model.as_deref(),
+                existing.thinking.as_deref(),
+                existing.advisor_model_key.as_deref(),
+                existing.advisor_thinking.as_deref(),
+            )
+            .await;
         }
 
         let new_session_file = new_session
@@ -282,7 +315,9 @@ impl ProjectsState {
             session_file: new_session_file.clone(),
             orchestrate: existing.orchestrate,
             role: existing.role.clone(),
-            advisor: existing.advisor,
+            profile,
+            advisor_model_key: existing.advisor_model_key.clone(),
+            advisor_thinking: existing.advisor_thinking.clone(),
             model: existing.model.clone(),
             thinking: existing.thinking.clone(),
             restart_pending: existing.restart_pending.clone(),
@@ -297,6 +332,7 @@ impl ProjectsState {
         let mut config = persist::load();
         if let Some(tab) = config.tabs.iter_mut().find(|t| t.id == id) {
             tab.session_file = new_session_file;
+            tab.profile = updated_project.profile.clone();
             let _ = persist::save(&config);
         }
 
@@ -363,74 +399,159 @@ impl ProjectsState {
         Ok(())
     }
 
-    pub async fn set_advisor(&self, id: &str, advisor: bool) -> Result<(), String> {
-        let project = {
-            let mut lock = self.projects.lock().await;
-            let proj = lock
-                .get_mut(id)
-                .ok_or_else(|| format!("Project '{id}' not found"))?;
-            let mut updated = (**proj).clone();
-            updated.advisor = advisor;
-            let arc = Arc::new(updated);
-            *proj = arc.clone();
-            arc
-        };
-        let slash = if advisor {
-            "/advisor on"
-        } else {
-            "/advisor off"
-        };
-        project.session.command(slash).await?;
+    pub async fn set_advisor(
+        &self,
+        id: &str,
+        model: Option<String>,
+        level: Option<String>,
+    ) -> Result<(), String> {
+        let _change = self.profile_changes.lock().await;
+        let project = self.get_project(id).await?;
+        if project.profile.is_some() {
+            return Err("Select Custom to pick an advisor model manually".into());
+        }
+        if !project.session.is_settled() {
+            return Err("Wait for omp to finish before changing advisor models".into());
+        }
+        let level = if model.is_some() { level } else { None };
+        if let (Some(model), Some(level)) = (model.as_deref(), level.as_deref()) {
+            roles::validate_model_thinking(&project.session, model, level).await?;
+        }
+        roles::set_advisor(&project.session, model.as_deref(), level.as_deref()).await?;
+        drop(project);
+
+        let mut lock = self.projects.lock().await;
+        let project = lock.get_mut(id).ok_or_else(|| format!("Project '{id}' not found"))?;
         let mut config = persist::load();
         if let Some(tab) = config.tabs.iter_mut().find(|t| t.id == id) {
-            tab.advisor = advisor;
-            let _ = persist::save(&config);
+            tab.advisor_model_key.clone_from(&model);
+            tab.advisor_thinking.clone_from(&level);
+            persist::save(&config)?;
         }
+        let project = Arc::make_mut(project);
+        project.advisor_model_key = model;
+        project.advisor_thinking = level;
         Ok(())
     }
 
-    /// Selecting a role drops any custom model and thinking override.
-    pub async fn set_role(&self, id: &str, role: &str) -> Result<serde_json::Value, String> {
+    pub async fn set_profile(&self, id: &str, name: Option<&str>) -> Result<ProjectInfo, String> {
+        let _change = self.profile_changes.lock().await;
         let project = self.get_project(id).await?;
-        let res = roles::set_role(&project.session, &project.dir, role).await?;
-        self.save_selection(id, role, None, None).await;
-        Ok(res)
+        let scopes;
+        let selection = if let Some(name) = name {
+            scopes = profiles::get(Some(&project.dir)).await?;
+            let profile = scopes.resolve(name).ok_or_else(|| format!("Model profile {name:?} not found"))?;
+            Some((name, profile))
+        } else {
+            None
+        };
+        self.apply_project_profile(&project, selection).await
     }
 
-    /// Switches to `roles::CUSTOM_ROLE`; keeps the thinking override.
-    pub async fn set_model(&self, id: &str, model: &str) -> Result<serde_json::Value, String> {
+    pub(crate) async fn apply_project_profile(
+        &self,
+        project: &Project,
+        selection: Option<(&str, &profiles::ModelProfile)>,
+    ) -> Result<ProjectInfo, String> {
+        if !project.session.is_settled() {
+            return Err("Wait for omp to finish before changing model profiles".into());
+        }
+        let (name, model, thinking) = match selection {
+            Some((name, profile)) => {
+                roles::apply_profile(&project.session, profile).await?;
+                (Some(name.to_owned()), None, None)
+            }
+            None if project.profile.is_some() => {
+                let state = project.session.get_state().await?;
+                let model = state["model"]["provider"].as_str().zip(state["model"]["id"].as_str())
+                    .map(|(provider, id)| format!("{provider}/{id}"));
+                let thinking = state["thinkingLevel"].as_str().map(str::to_owned);
+                roles::clear_profile(
+                    &project.session,
+                    project.advisor_model_key.as_deref(),
+                    project.advisor_thinking.as_deref(),
+                )
+                .await?;
+                (None, model, thinking)
+            }
+            None => return Ok(ProjectInfo::from(project)),
+        };
+        self.save_selection(&project.id, roles::CUSTOM_ROLE, name, model, thinking).await
+    }
+
+    /// Switches to `roles::CUSTOM_ROLE`; keeps the thinking override unless explicitly changed.
+    pub async fn set_model(
+        &self,
+        id: &str,
+        model: &str,
+        level: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let _change = self.profile_changes.lock().await;
         let project = self.get_project(id).await?;
+        if project.profile.is_some() {
+            return Err("Select Custom to pick a model manually".into());
+        }
+        if let Some(level) = level {
+            roles::validate_model_thinking(&project.session, model, level).await?;
+        }
         let res = roles::set_model(&project.session, model).await?;
-        self.save_selection(id, roles::CUSTOM_ROLE, Some(model.to_string()), project.thinking.clone())
-            .await;
+        let thinking = if let Some(level) = level {
+            roles::set_thinking(&project.session, level).await?;
+            Some(level.to_owned())
+        } else {
+            project.thinking.clone()
+        };
+        self.save_selection(id, roles::CUSTOM_ROLE, None, Some(model.to_owned()), thinking)
+            .await?;
         Ok(res)
     }
 
     pub async fn set_thinking(&self, id: &str, level: &str) -> Result<serde_json::Value, String> {
+        let _change = self.profile_changes.lock().await;
         let project = self.get_project(id).await?;
+        if project.profile.is_some() {
+            return Err("Select Custom to change thinking manually".into());
+        }
         let res = roles::set_thinking(&project.session, level).await?;
-        self.save_selection(id, &project.role, project.model.clone(), Some(level.to_string()))
-            .await;
+        self.save_selection(id, &project.role, None, project.model.clone(), Some(level.to_owned()))
+            .await?;
         Ok(res)
     }
 
-    async fn save_selection(&self, id: &str, role: &str, model: Option<String>, thinking: Option<String>) {
-        {
-            let mut lock = self.projects.lock().await;
-            if let Some(proj) = lock.get_mut(id) {
-                let mut updated = (**proj).clone();
-                updated.role = role.to_string();
-                updated.model = model.clone();
-                updated.thinking = thinking.clone();
-                *proj = Arc::new(updated);
-            }
-        }
+    async fn save_selection(
+        &self,
+        id: &str,
+        role: &str,
+        profile: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+    ) -> Result<ProjectInfo, String> {
+        let mut lock = self.projects.lock().await;
+        let project = lock.get_mut(id).ok_or_else(|| format!("Project '{id}' not found"))?;
         let mut config = persist::load();
         if let Some(tab) = config.tabs.iter_mut().find(|t| t.id == id) {
-            tab.role = role.to_string();
-            tab.model = model;
-            tab.thinking = thinking;
-            let _ = persist::save(&config);
+            tab.role = role.to_owned();
+            tab.profile.clone_from(&profile);
+            tab.model.clone_from(&model);
+            tab.thinking.clone_from(&thinking);
+            persist::save(&config)?;
         }
+        let mut updated = (**project).clone();
+        updated.role = role.to_owned();
+        updated.profile = profile;
+        updated.model = model;
+        updated.thinking = thinking;
+        let info = ProjectInfo::from(&updated);
+        *project = Arc::new(updated);
+        Ok(info)
     }
+}
+
+async fn restore_profile(session: &OmpSession, dir: &Path, name: Option<&str>) -> Result<(), String> {
+    if let Some(name) = name {
+        let scopes = profiles::get(Some(dir)).await?;
+        let profile = scopes.resolve(name).ok_or_else(|| format!("Model profile {name:?} not found"))?;
+        roles::apply_profile(session, profile).await?;
+    }
+    Ok(())
 }

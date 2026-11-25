@@ -29,7 +29,11 @@ pub struct TabConfig {
     #[serde(default = "default_role")]
     pub role: String,
     #[serde(default)]
-    pub advisor: bool,
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub advisor_model_key: Option<String>,
+    #[serde(default)]
+    pub advisor_thinking: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -172,7 +176,9 @@ mod tests {
                     session_file: Some("/workspace/.omp/sessions/s1.jsonl".to_string()),
                     orchestrate: true,
                     role: "planner".to_string(),
-                    advisor: true,
+                    profile: Some("deep".to_string()),
+                    advisor_model_key: Some("openai/gpt-5".to_string()),
+                    advisor_thinking: Some("high".to_string()),
                     model: Some("anthropic/claude-sonnet-5-5".to_string()),
                     thinking: Some("high".to_string()),
                 },
@@ -182,7 +188,9 @@ mod tests {
                     session_file: None,
                     orchestrate: false,
                     role: "default".to_string(),
-                    advisor: false,
+                    profile: None,
+                    advisor_model_key: None,
+                    advisor_thinking: None,
                     model: None,
                     thinking: None,
                 },
@@ -191,6 +199,16 @@ mod tests {
 
         save_to(&path, &config).expect("save_to should succeed");
         assert!(path.exists());
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read saved config"))
+                .expect("parse saved config");
+        assert_eq!(saved["tabs"][0]["advisorModelKey"], "openai/gpt-5");
+        assert_eq!(saved["tabs"][0]["advisorThinking"], "high");
+        assert!(saved["tabs"][0].get("advisor").is_none());
+        assert_eq!(
+            saved["tabs"][1].get("advisorModelKey"),
+            Some(&serde_json::Value::Null)
+        );
 
         let loaded = load_from(&path);
         assert_eq!(loaded, config);
@@ -238,11 +256,11 @@ mod tests {
     }
 
     #[test]
-    fn test_default_deserialization() {
+    fn test_default_deserialization_ignores_legacy_advisor_toggle() {
         let raw = r#"{
             "activeTab": "tab-1",
             "tabs": [
-                { "id": "tab-1", "dir": "/tmp" }
+                { "id": "tab-1", "dir": "/tmp", "advisor": true }
             ]
         }"#;
 
@@ -256,7 +274,8 @@ mod tests {
         assert_eq!(cfg.tabs[0].session_file, None);
         assert!(!cfg.tabs[0].orchestrate);
         assert_eq!(cfg.tabs[0].role, "default");
-        assert!(!cfg.tabs[0].advisor);
+        assert_eq!(cfg.tabs[0].advisor_model_key, None);
+        assert_eq!(cfg.tabs[0].advisor_thinking, None);
     }
 
     #[test]
